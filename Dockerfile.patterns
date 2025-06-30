@@ -1,0 +1,60 @@
+# Dockerfile for Pattern Analysis Service
+# This service detects technical patterns with news context using TA-Lib
+FROM python:3.10-slim
+
+# Install system dependencies and TA-Lib prerequisites
+RUN apt-get update && apt-get install -y \
+    gcc \
+    g++ \
+    make \
+    wget \
+    postgresql-client \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install TA-Lib C library
+RUN wget http://prdownloads.sourceforge.net/ta-lib/ta-lib-0.4.0-src.tar.gz && \
+    tar -xzf ta-lib-0.4.0-src.tar.gz && \
+    cd ta-lib && \
+    ./configure --prefix=/usr && \
+    make && \
+    make install && \
+    cd .. && \
+    rm -rf ta-lib ta-lib-0.4.0-src.tar.gz
+
+# Set working directory
+WORKDIR /app
+
+# Copy requirements file
+COPY requirements.txt .
+
+# Install Python dependencies (including TA-Lib Python wrapper)
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Create non-root user for security
+RUN useradd -m -u 1000 trading && \
+    chown -R trading:trading /app
+
+# Copy application code
+COPY pattern_service.py .
+COPY database_utils.py .
+
+# Switch to non-root user
+USER trading
+
+# Set environment variables
+ENV PORT=5002
+ENV SERVICE_NAME=pattern_analysis
+ENV PYTHONPATH=/app
+ENV PYTHONUNBUFFERED=1
+ENV LD_LIBRARY_PATH=/usr/lib
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:${PORT}/health || exit 1
+
+# Expose port
+EXPOSE 5002
+
+# Run the service with gunicorn for production
+CMD ["gunicorn", "--bind", "0.0.0.0:5002", "--workers", "2", "--threads", "4", "--timeout", "300", "pattern_service:app"]

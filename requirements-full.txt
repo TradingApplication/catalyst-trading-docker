@@ -1,0 +1,289 @@
+# =============================================================================
+# CATALYST TRADING SYSTEM - PYTHON DEPENDENCIES
+# Complete requirements for all 8 microservices
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# CORE WEB FRAMEWORK & SERVER
+# -----------------------------------------------------------------------------
+Flask==3.0.0
+gunicorn==21.2.0
+Werkzeug==3.0.1
+Jinja2==3.1.2
+itsdangerous==2.1.2
+click==8.1.7
+
+# -----------------------------------------------------------------------------
+# DATABASE & CACHING
+# -----------------------------------------------------------------------------
+# PostgreSQL adapter (compiled for performance)
+psycopg2-binary==2.9.9
+
+# Redis client
+redis==5.0.1
+
+# SQL toolkit
+SQLAlchemy==2.0.23
+
+# Database migrations
+alembic==1.13.1
+
+# -----------------------------------------------------------------------------
+# DATA PROCESSING & ANALYSIS
+# -----------------------------------------------------------------------------
+# Core data libraries
+pandas==2.1.4
+numpy==1.24.4
+scipy==1.11.4
+
+# Date/time handling
+python-dateutil==2.8.2
+pytz==2023.3
+
+# JSON handling
+ujson==5.9.0
+
+# -----------------------------------------------------------------------------
+# FINANCIAL DATA & TRADING
+# -----------------------------------------------------------------------------
+# Yahoo Finance data
+yfinance==0.2.25
+
+# Technical Analysis Library (requires C compilation)
+TA-Lib==0.4.28
+
+# Alpaca trading API
+alpaca-trade-api==3.1.1
+
+# Financial calculations
+quantlib==1.32
+
+# Market data
+alpha-vantage==2.3.1
+
+# -----------------------------------------------------------------------------
+# NEWS & TEXT PROCESSING
+# -----------------------------------------------------------------------------
+# HTTP requests
+requests==2.31.0
+urllib3==2.1.0
+
+# RSS feed parsing
+feedparser==6.0.10
+
+# Text analysis
+textblob==0.17.1
+nltk==3.8.1
+
+# HTML parsing
+beautifulsoup4==4.12.2
+lxml==4.9.4
+
+# JSON schema validation
+jsonschema==4.20.0
+
+# -----------------------------------------------------------------------------
+# MACHINE LEARNING (for future ML features)
+# -----------------------------------------------------------------------------
+scikit-learn==1.3.2
+joblib==1.3.2
+
+# -----------------------------------------------------------------------------
+# ASYNC & CONCURRENT PROCESSING
+# -----------------------------------------------------------------------------
+# Async HTTP client
+aiohttp==3.9.1
+aiofiles==23.2.1
+
+# Thread pool utilities
+concurrent-futures==3.1.1
+
+# Task queue (for future scaling)
+celery==5.3.4
+
+# -----------------------------------------------------------------------------
+# MONITORING & METRICS
+# -----------------------------------------------------------------------------
+# Prometheus client
+prometheus-client==0.19.0
+
+# Application performance monitoring
+structlog==23.2.0
+
+# Health checks
+py-healthcheck==1.10.1
+
+# -----------------------------------------------------------------------------
+# CONFIGURATION & ENVIRONMENT
+# -----------------------------------------------------------------------------
+# Environment variables
+python-dotenv==1.0.0
+
+# Configuration management
+pydantic==2.5.2
+pydantic-settings==2.1.0
+
+# YAML configuration
+PyYAML==6.0.1
+
+# -----------------------------------------------------------------------------
+# SECURITY & AUTHENTICATION
+# -----------------------------------------------------------------------------
+# JWT tokens
+PyJWT==2.8.0
+
+# Password hashing
+bcrypt==4.1.2
+
+# CORS handling
+Flask-CORS==4.0.0
+
+# Input validation
+marshmallow==3.20.1
+
+# -----------------------------------------------------------------------------
+# API CLIENTS & EXTERNAL SERVICES
+# -----------------------------------------------------------------------------
+# REST API client
+httpx==0.25.2
+
+# API rate limiting
+ratelimit==2.2.1
+
+# Retry logic
+tenacity==8.2.3
+
+# -----------------------------------------------------------------------------
+# DEVELOPMENT & TESTING
+# -----------------------------------------------------------------------------
+# Testing framework
+pytest==7.4.3
+pytest-asyncio==0.21.1
+pytest-cov==4.1.0
+
+# Code formatting
+black==23.11.0
+isort==5.12.0
+
+# Linting
+flake8==6.1.0
+pylint==3.0.3
+
+# Type checking
+mypy==1.7.1
+
+# -----------------------------------------------------------------------------
+# UTILITIES & HELPERS
+# -----------------------------------------------------------------------------
+# Progress bars
+tqdm==4.66.1
+
+# File system operations
+pathlib2==2.3.7
+
+# Caching decorators
+cachetools==5.3.2
+
+# Timezone handling
+pytz==2023.3
+
+# Email sending
+smtplib-ssl==1.0.0
+
+# PDF generation (for reports)
+reportlab==4.0.7
+
+# Excel file handling
+openpyxl==3.1.2
+xlsxwriter==3.1.9
+
+# CSV enhanced handling
+csvkit==1.4.0
+
+# -----------------------------------------------------------------------------
+# SYSTEM MONITORING
+# -----------------------------------------------------------------------------
+# System metrics
+psutil==5.9.6
+
+# Memory profiling
+memory-profiler==0.61.0
+
+# CPU profiling
+py-spy==0.3.14
+
+# -----------------------------------------------------------------------------
+# DOCKER & DEPLOYMENT
+# -----------------------------------------------------------------------------
+# Health check endpoint
+Flask-HealthCheck==1.0.0
+
+# Container utilities
+python-on-whales==0.67.0
+
+# -----------------------------------------------------------------------------
+# SPECIAL REQUIREMENTS FOR PATTERN ANALYSIS
+# -----------------------------------------------------------------------------
+# Advanced mathematical operations
+sympy==1.12
+
+# Statistics
+statsmodels==0.14.0
+
+# Signal processing
+scipy==1.11.4
+
+# -----------------------------------------------------------------------------
+# WEB DASHBOARD SPECIFIC
+# -----------------------------------------------------------------------------
+# Template engine
+Flask-Login==0.6.3
+
+# Session management
+Flask-Session==0.5.0
+
+# Form handling
+WTForms==3.1.1
+
+# File uploads
+Flask-Uploads==0.2.1
+
+# Socket.IO for real-time updates
+python-socketio==5.10.0
+Flask-SocketIO==5.3.6
+
+# -----------------------------------------------------------------------------
+# VERSION COMPATIBILITY
+# -----------------------------------------------------------------------------
+# Ensure compatibility with Python 3.10+
+typing-extensions==4.8.0
+importlib-metadata==6.8.0
+
+# =============================================================================
+# INSTALLATION NOTES:
+# =============================================================================
+# 
+# TA-Lib Installation:
+# TA-Lib requires C library compilation. The Dockerfiles handle this with:
+# 1. Install build dependencies (gcc, make, etc.)
+# 2. Download and compile TA-Lib C library
+# 3. Install Python wrapper
+#
+# For local development on different platforms:
+# - Windows: Use conda or pre-compiled wheels
+# - macOS: brew install ta-lib
+# - Linux: sudo apt-get install libta-lib-dev
+#
+# Memory Usage Optimization:
+# - Use pandas with efficient dtypes
+# - Limit yfinance data downloads
+# - Clear large DataFrames after use
+# - Use Redis for intermediate results
+#
+# Performance Notes:
+# - psycopg2-binary for faster database connections
+# - ujson for faster JSON parsing
+# - numpy/pandas compiled with optimizations
+# - Redis for hot data caching
+#
+# =============================================================================

@@ -1,0 +1,326 @@
+# =============================================================================
+# CATALYST TRADING SYSTEM - PROMETHEUS MONITORING CONFIGURATION
+# Comprehensive monitoring for all services and infrastructure
+# =============================================================================
+
+global:
+  scrape_interval: 15s          # Default scrape interval
+  evaluation_interval: 15s      # Default rule evaluation interval
+  external_labels:
+    monitor: 'catalyst-trading'
+    environment: 'production'
+    region: 'singapore'
+
+# Alertmanager configuration (for future expansion)
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+          # - alertmanager:9093
+
+# Rule files for alerting (can be added later)
+rule_files:
+  # - "alert_rules.yml"
+
+# Scrape configuration
+scrape_configs:
+  # ==========================================================================
+  # TRADING SYSTEM SERVICES
+  # ==========================================================================
+  
+  # Coordination Service
+  - job_name: 'coordination-service'
+    static_configs:
+      - targets: ['coordination-service:5000']
+    metrics_path: '/metrics'
+    scrape_interval: 10s
+    scrape_timeout: 5s
+    params:
+      format: ['prometheus']
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: coordination-service:5000
+    metric_relabel_configs:
+      - source_labels: [__name__]
+        regex: 'coordination_.*'
+        target_label: service
+        replacement: 'coordination'
+
+  # News Collection Service
+  - job_name: 'news-service'
+    static_configs:
+      - targets: ['news-service:5008']
+    metrics_path: '/metrics'
+    scrape_interval: 30s
+    scrape_timeout: 10s
+    metric_relabel_configs:
+      - source_labels: [__name__]
+        regex: 'news_.*'
+        target_label: service
+        replacement: 'news'
+
+  # Security Scanner Service
+  - job_name: 'scanner-service'
+    static_configs:
+      - targets: ['scanner-service:5001']
+    metrics_path: '/metrics'
+    scrape_interval: 15s
+    scrape_timeout: 10s
+    metric_relabel_configs:
+      - source_labels: [__name__]
+        regex: 'scanner_.*'
+        target_label: service
+        replacement: 'scanner'
+
+  # Pattern Analysis Service
+  - job_name: 'pattern-service'
+    static_configs:
+      - targets: ['pattern-service:5002']
+    metrics_path: '/metrics'
+    scrape_interval: 15s
+    scrape_timeout: 10s
+    metric_relabel_configs:
+      - source_labels: [__name__]
+        regex: 'pattern_.*'
+        target_label: service
+        replacement: 'pattern'
+
+  # Technical Analysis Service
+  - job_name: 'technical-service'
+    static_configs:
+      - targets: ['technical-service:5003']
+    metrics_path: '/metrics'
+    scrape_interval: 15s
+    scrape_timeout: 10s
+    metric_relabel_configs:
+      - source_labels: [__name__]
+        regex: 'technical_.*'
+        target_label: service
+        replacement: 'technical'
+
+  # Trading Service
+  - job_name: 'trading-service'
+    static_configs:
+      - targets: ['trading-service:5005']
+    metrics_path: '/metrics'
+    scrape_interval: 5s           # More frequent for trading
+    scrape_timeout: 3s
+    metric_relabel_configs:
+      - source_labels: [__name__]
+        regex: 'trading_.*'
+        target_label: service
+        replacement: 'trading'
+
+  # Reporting Service
+  - job_name: 'reporting-service'
+    static_configs:
+      - targets: ['reporting-service:5009']
+    metrics_path: '/metrics'
+    scrape_interval: 30s
+    scrape_timeout: 10s
+    metric_relabel_configs:
+      - source_labels: [__name__]
+        regex: 'reporting_.*'
+        target_label: service
+        replacement: 'reporting'
+
+  # Web Dashboard Service
+  - job_name: 'dashboard-service'
+    static_configs:
+      - targets: ['web-dashboard:5010']
+    metrics_path: '/metrics'
+    scrape_interval: 15s
+    scrape_timeout: 5s
+    metric_relabel_configs:
+      - source_labels: [__name__]
+        regex: 'dashboard_.*'
+        target_label: service
+        replacement: 'dashboard'
+
+  # ==========================================================================
+  # INFRASTRUCTURE SERVICES
+  # ==========================================================================
+
+  # Redis Cache Monitoring
+  - job_name: 'redis'
+    static_configs:
+      - targets: ['redis:6379']
+    metrics_path: '/metrics'
+    scrape_interval: 15s
+    scrape_timeout: 5s
+
+  # Nginx Monitoring
+  - job_name: 'nginx'
+    static_configs:
+      - targets: ['nginx:80']
+    metrics_path: '/nginx_status'
+    scrape_interval: 15s
+    scrape_timeout: 5s
+
+  # Prometheus Self-Monitoring
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+    scrape_interval: 15s
+    scrape_timeout: 5s
+
+  # ==========================================================================
+  # SYSTEM & CONTAINER MONITORING
+  # ==========================================================================
+
+  # Node Exporter (if added for system metrics)
+  # - job_name: 'node-exporter'
+  #   static_configs:
+  #     - targets: ['node-exporter:9100']
+  #   scrape_interval: 15s
+
+  # cAdvisor (for container metrics)
+  # - job_name: 'cadvisor'
+  #   static_configs:
+  #     - targets: ['cadvisor:8080']
+  #   scrape_interval: 15s
+
+  # ==========================================================================
+  # HEALTH CHECK MONITORING
+  # ==========================================================================
+
+  # Health check probes for all services
+  - job_name: 'health-checks'
+    metrics_path: '/health'
+    scrape_interval: 30s
+    scrape_timeout: 10s
+    static_configs:
+      - targets:
+        - 'coordination-service:5000'
+        - 'news-service:5008'
+        - 'scanner-service:5001'
+        - 'pattern-service:5002'
+        - 'technical-service:5003'
+        - 'trading-service:5005'
+        - 'reporting-service:5009'
+        - 'web-dashboard:5010'
+    relabel_configs:
+      - source_labels: [__address__]
+        regex: '([^:]+):(\d+)'
+        target_label: service_name
+        replacement: '${1}'
+      - source_labels: [__address__]
+        regex: '([^:]+):(\d+)'
+        target_label: service_port
+        replacement: '${2}'
+
+  # ==========================================================================
+  # EXTERNAL API MONITORING (Optional)
+  # ==========================================================================
+
+  # Monitor external API response times
+  - job_name: 'external-apis'
+    metrics_path: '/probe'
+    params:
+      module: [http_2xx]
+    static_configs:
+      - targets:
+        - 'https://newsapi.org'
+        - 'https://www.alphavantage.co'
+        - 'https://finnhub.io'
+        - 'https://paper-api.alpaca.markets'
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: 'blackbox-exporter:9115'  # If blackbox exporter is added
+
+# =============================================================================
+# RECORDING RULES (Pre-computed metrics)
+# =============================================================================
+
+# These can be added to a separate rules file
+# recording_rules:
+#   - name: trading_system_rules
+#     interval: 30s
+#     rules:
+#       - record: trading:success_rate_5m
+#         expr: |
+#           (
+#             rate(trading_trades_successful_total[5m]) /
+#             rate(trading_trades_total[5m])
+#           ) * 100
+#       
+#       - record: news:collection_rate_1h
+#         expr: rate(news_articles_collected_total[1h])
+#       
+#       - record: scanner:candidates_per_scan
+#         expr: |
+#           rate(scanner_candidates_selected_total[10m]) /
+#           rate(scanner_scans_completed_total[10m])
+
+# =============================================================================
+# EXPECTED METRICS FROM SERVICES
+# =============================================================================
+
+# Each service should expose these types of metrics:
+
+# COORDINATION SERVICE:
+# - coordination_cycles_total (counter)
+# - coordination_cycle_duration_seconds (histogram)
+# - coordination_services_healthy (gauge)
+# - coordination_workflow_errors_total (counter)
+
+# NEWS SERVICE:
+# - news_articles_collected_total (counter)
+# - news_sources_active (gauge)
+# - news_collection_duration_seconds (histogram)
+# - news_api_errors_total (counter)
+
+# SCANNER SERVICE:
+# - scanner_scans_total (counter)
+# - scanner_candidates_selected_total (counter)
+# - scanner_scan_duration_seconds (histogram)
+# - scanner_universe_size (gauge)
+
+# PATTERN SERVICE:
+# - pattern_detections_total (counter)
+# - pattern_analysis_duration_seconds (histogram)
+# - pattern_confidence_score (histogram)
+# - pattern_types_detected (counter)
+
+# TECHNICAL SERVICE:
+# - technical_signals_generated_total (counter)
+# - technical_signal_confidence (histogram)
+# - technical_analysis_duration_seconds (histogram)
+# - technical_indicators_calculated_total (counter)
+
+# TRADING SERVICE:
+# - trading_orders_total (counter)
+# - trading_positions_open (gauge)
+# - trading_pnl_total (gauge)
+# - trading_execution_duration_seconds (histogram)
+
+# REPORTING SERVICE:
+# - reporting_requests_total (counter)
+# - reporting_generation_duration_seconds (histogram)
+# - reporting_data_points_processed (counter)
+
+# DASHBOARD SERVICE:
+# - dashboard_requests_total (counter)
+# - dashboard_websocket_connections (gauge)
+# - dashboard_response_duration_seconds (histogram)
+
+# =============================================================================
+# RETENTION POLICIES
+# =============================================================================
+
+# Default retention: 15 days
+# High-frequency trading metrics: 7 days
+# System health metrics: 30 days
+# Business metrics: 90 days
+
+# Configure in docker-compose with:
+# --storage.tsdb.retention.time=15d
+# --storage.tsdb.retention.size=10GB

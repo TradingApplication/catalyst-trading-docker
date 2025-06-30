@@ -1,0 +1,40 @@
+# Coordination Service Requirements
+# Python 3.10+
+
+# Web framework
+Flask==2.3.3
+gunicorn==21.2.0
+
+# Database
+psycopg2-binary==2.9.7
+SQLAlchemy==2.0.21
+
+# HTTP client
+requests==2.31.0
+urllib3==2.0.4
+
+# Scheduling
+schedule==1.2.0
+
+# Utilities
+python-dateutil==2.8.2
+pytz==2023.3
+
+# JSON handling
+orjson==3.9.5
+
+# Logging
+python-json-logger==2.0.7
+
+# Health monitoring
+py-healthcheck==1.10.1
+
+# Environment management
+python-dotenv==1.0.0
+
+# Redis (for future caching)
+redis==5.0.0
+
+# Testing (optional, exclude in production)
+pytest==7.4.2
+pytest-cov==4.1.0

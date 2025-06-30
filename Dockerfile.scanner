@@ -1,0 +1,442 @@
+# =============================================================================
+# CATALYST TRADING SYSTEM - SECURITY SCANNER SERVICE DOCKERFILE
+# Selects top trading candidates based on news catalysts and technicals
+# =============================================================================
+
+FROM python:3.10-slim
+
+# Set metadata
+LABEL maintainer="Catalyst Trading System"
+LABEL version="2.0.0"
+LABEL service="security_scanner"
+LABEL description="Dynamic security scanning with catalyst scoring"
+
+# Set environment variables
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONPATH=/app
+ENV PORT=5001
+ENV SERVICE_NAME=security_scanner
+
+# Set working directory
+WORKDIR /app
+
+# Install system dependencies for financial data processing
+RUN apt-get update && apt-get install -y \
+    # Build essentials
+    gcc \
+    g++ \
+    make \
+    libc6-dev \
+    # Database client
+    postgresql-client \
+    # Network utilities
+    curl \
+    wget \
+    # Math libraries for calculations
+    libopenblas-dev \
+    liblapack-dev \
+    gfortran \
+    # Process management
+    supervisor \
+    # Cleanup
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/* \
+    && rm -rf /tmp/* \
+    && rm -rf /var/tmp/*
+
+# Create non-root user for security
+RUN groupadd -r trading && useradd -r -g trading trading
+
+# Copy requirements and install Python dependencies
+COPY requirements.txt .
+
+# Install Python packages optimized for financial calculations
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
+    # Install numpy first for better compilation
+    pip install --no-cache-dir numpy==1.24.4 && \
+    # Install pandas with optimizations
+    pip install --no-cache-dir pandas==2.1.4 && \
+    # Install remaining requirements
+    pip install --no-cache-dir -r requirements.txt && \
+    # Clean up pip cache
+    pip cache purge
+
+# Create necessary directories
+RUN mkdir -p /app/logs /app/data /app/config /app/cache && \
+    chown -R trading:trading /app
+
+# Copy service source code
+COPY security-scanner-v200.py ./scanner_service.py
+COPY database_utils.py ./database_utils.py
+
+# Copy configuration files
+COPY config/ ./config/
+
+# Create market data cache directory
+RUN mkdir -p /app/cache/market_data && \
+    chown -R trading:trading /app/cache
+
+# Create health check script
+RUN echo '#!/bin/bash\n\
+# Enhanced health check for scanner service\n\
+for i in {1..3}; do\n\
+    response=$(curl -s --max-time 10 http://localhost:${PORT}/health)\n\
+    if [ $? -eq 0 ] && echo "$response" | grep -q "healthy"; then\n\
+        echo "Scanner service is healthy"\n\
+        exit 0\n\
+    fi\n\
+    echo "Health check attempt $i failed, retrying..."\n\
+    sleep 3\n\
+done\n\
+echo "Scanner service health check failed"\n\
+exit 1' > /app/healthcheck.sh && \
+    chmod +x /app/healthcheck.sh && \
+    chown trading:trading /app/healthcheck.sh
+
+# Create startup script with comprehensive initialization
+RUN echo '#!/bin/bash\n\
+set -e\n\
+\n\
+echo "=== Starting Security Scanner Service v2.0.0 ==="\n\
+\n\
+# Wait for database to be ready\n\
+echo "Waiting for database connection..."\n\
+DB_RETRY_COUNT=0\n\
+MAX_DB_RETRIES=30\n\
+while ! pg_isready -d "$DATABASE_URL" > /dev/null 2>&1; do\n\
+    DB_RETRY_COUNT=$((DB_RETRY_COUNT + 1))\n\
+    if [ $DB_RETRY_COUNT -ge $MAX_DB_RETRIES ]; then\n\
+        echo "Database connection failed after $MAX_DB_RETRIES attempts"\n\
+        exit 1\n\
+    fi\n\
+    echo "Database not ready (attempt $DB_RETRY_COUNT/$MAX_DB_RETRIES), waiting..."\n\
+    sleep 2\n\
+done\n\
+echo "Database connection established!"\n\
+\n\
+# Wait for Redis to be ready\n\
+echo "Waiting for Redis connection..."\n\
+REDIS_RETRY_COUNT=0\n\
+MAX_REDIS_RETRIES=15\n\
+until redis-cli -u "$REDIS_URL" ping > /dev/null 2>&1; do\n\
+    REDIS_RETRY_COUNT=$((REDIS_RETRY_COUNT + 1))\n\
+    if [ $REDIS_RETRY_COUNT -ge $MAX_REDIS_RETRIES ]; then\n\
+        echo "Redis connection failed after $MAX_REDIS_RETRIES attempts"\n\
+        exit 1\n\
+    fi\n\
+    echo "Redis not ready (attempt $REDIS_RETRY_COUNT/$MAX_REDIS_RETRIES), waiting..."\n\
+    sleep 2\n\
+done\n\
+echo "Redis connection established!"\n\
+\n\
+# Wait for news service to be ready\n\
+echo "Waiting for news service..."\n\
+NEWS_RETRY_COUNT=0\n\
+MAX_NEWS_RETRIES=20\n\
+while ! curl -s --max-time 5 "$NEWS_SERVICE_URL/health" > /dev/null 2>&1; do\n\
+    NEWS_RETRY_COUNT=$((NEWS_RETRY_COUNT + 1))\n\
+    if [ $NEWS_RETRY_COUNT -ge $MAX_NEWS_RETRIES ]; then\n\
+        echo "⚠ News service not available after $MAX_NEWS_RETRIES attempts, continuing anyway"\n\
+        break\n\
+    fi\n\
+    echo "News service not ready (attempt $NEWS_RETRY_COUNT/$MAX_NEWS_RETRIES), waiting..."\n\
+    sleep 3\n\
+done\n\
+\n\
+if [ $NEWS_RETRY_COUNT -lt $MAX_NEWS_RETRIES ]; then\n\
+    echo "News service connection established!"\n\
+fi\n\
+\n\
+# Initialize scanner database tables\n\
+echo "Initializing scanner database schema..."\n\
+python -c "\n\
+import os\n\
+import psycopg2\n\
+\n\
+try:\n\
+    conn = psycopg2.connect(os.getenv(\"DATABASE_URL\"))\n\
+    cur = conn.cursor()\n\
+    \n\
+    # Create trading_candidates table if not exists\n\
+    cur.execute(\"\"\"\n\
+        CREATE TABLE IF NOT EXISTS trading_candidates (\n\
+            id BIGSERIAL PRIMARY KEY,\n\
+            scan_id VARCHAR(50) NOT NULL,\n\
+            symbol VARCHAR(10) NOT NULL,\n\
+            selection_timestamp TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,\n\
+            catalyst_score DECIMAL(5,2) NOT NULL,\n\
+            news_count INTEGER,\n\
+            primary_catalyst VARCHAR(50),\n\
+            price DECIMAL(10,2),\n\
+            volume BIGINT,\n\
+            relative_volume DECIMAL(5,2),\n\
+            price_change_pct DECIMAL(5,2),\n\
+            technical_score DECIMAL(5,2),\n\
+            combined_score DECIMAL(5,2),\n\
+            selection_rank INTEGER,\n\
+            analyzed BOOLEAN DEFAULT FALSE,\n\
+            traded BOOLEAN DEFAULT FALSE\n\
+        )\n\
+    \"\"\")\n\
+    \n\
+    # Create scanning results table\n\
+    cur.execute(\"\"\"\n\
+        CREATE TABLE IF NOT EXISTS scanning_results (\n\
+            id BIGSERIAL PRIMARY KEY,\n\
+            scan_id VARCHAR(50) UNIQUE NOT NULL,\n\
+            scan_timestamp TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,\n\
+            scan_mode VARCHAR(20),\n\
+            universe_size INTEGER,\n\
+            candidates_found INTEGER,\n\
+            execution_time_seconds DECIMAL(10,3),\n\
+            metadata JSONB\n\
+        )\n\
+    \"\"\")\n\
+    \n\
+    conn.commit()\n\
+    conn.close()\n\
+    print(\"Scanner database schema initialized\")\n\
+    \n\
+except Exception as e:\n\
+    print(f\"Scanner database initialization failed: {e}\")\n\
+    exit(1)\n\
+"\n\
+\n\
+# Test yfinance connectivity\n\
+echo "Testing market data connectivity..."\n\
+python -c "\n\
+import yfinance as yf\n\
+import pandas as pd\n\
+from datetime import datetime, timedelta\n\
+\n\
+try:\n\
+    # Test with a major stock\n\
+    ticker = yf.Ticker(\"AAPL\")\n\
+    info = ticker.info\n\
+    if \"symbol\" in info and info[\"symbol\"] == \"AAPL\":\n\
+        print(\"✓ Market data connection successful\")\n\
+    else:\n\
+        print(\"⚠ Market data connection issue\")\n\
+except Exception as e:\n\
+    print(f\"⚠ Market data test failed: {e}\")\n\
+    print(\"Scanner will continue with limited functionality\")\n\
+"\n\
+\n\
+# Start the scanner service\n\
+echo "Starting Security Scanner Service..."\n\
+echo "Configuration:"\n\
+echo "  - Universe size: 100 securities"\n\
+echo "  - Final picks: 5 top candidates"\n\
+echo "  - Catalyst scoring: News-driven selection"\n\
+echo "  - Technical validation: Price, volume, momentum"\n\
+\n\
+exec gunicorn --bind 0.0.0.0:${PORT} \\\n\
+    --workers 2 \\\n\
+    --worker-class gthread \\\n\
+    --threads 6 \\\n\
+    --worker-connections 1000 \\\n\
+    --max-requests 500 \\\n\
+    --max-requests-jitter 50 \\\n\
+    --timeout 180 \\\n\
+    --keep-alive 2 \\\n\
+    --log-level info \\\n\
+    --access-logfile /app/logs/access.log \\\n\
+    --error-logfile /app/logs/error.log \\\n\
+    --capture-output \\\n\
+    --enable-stdio-inheritance \\\n\
+    scanner_service:app' > /app/start.sh && \
+    chmod +x /app/start.sh && \
+    chown trading:trading /app/start.sh
+
+# Create market data warming script
+RUN echo '#!/bin/bash\n\
+# Pre-warm market data cache before market open\n\
+echo "$(date): Starting market data pre-warming"\n\
+\n\
+# Get current hour (EST)\n\
+current_hour=$(TZ=America/New_York date +%H)\n\
+\n\
+# Only run pre-warming 30 minutes before market open\n\
+if [ $current_hour -eq 9 ] && [ $(date +%M) -ge 0 ] && [ $(date +%M) -lt 30 ]; then\n\
+    echo "Pre-warming market data cache..."\n\
+    \n\
+    # Trigger cache warming via API\n\
+    curl -X POST "http://localhost:${PORT}/warm_cache" \\\n\
+        -H "Content-Type: application/json" \\\n\
+        -d "{\"symbols\": [\"SPY\", \"QQQ\", \"IWM\", \"DIA\", \"VXX\"]}" \\\n\
+        --max-time 120 > /dev/null 2>&1\n\
+    \n\
+    echo "$(date): Market data cache warming completed"\n\
+else\n\
+    echo "$(date): Not in pre-market warming window, skipping"\n\
+fi' > /app/warm_cache.sh && \
+    chmod +x /app/warm_cache.sh && \
+    chown trading:trading /app/warm_cache.sh
+
+# Create supervisor configuration
+RUN echo '[supervisord]\n\
+nodaemon=true\n\
+user=trading\n\
+logfile=/app/logs/supervisord.log\n\
+pidfile=/app/logs/supervisord.pid\n\
+\n\
+[program:scanner_service]\n\
+command=/app/start.sh\n\
+directory=/app\n\
+user=trading\n\
+autostart=true\n\
+autorestart=true\n\
+startsecs=20\n\
+startretries=3\n\
+stdout_logfile=/app/logs/scanner.log\n\
+stderr_logfile=/app/logs/scanner_error.log\n\
+stdout_logfile_maxbytes=100MB\n\
+stderr_logfile_maxbytes=100MB\n\
+stdout_logfile_backups=3\n\
+stderr_logfile_backups=3\n\
+\n\
+[program:cache_warmer]\n\
+command=/bin/bash -c "while true; do /app/warm_cache.sh; sleep 1800; done"\n\
+directory=/app\n\
+user=trading\n\
+autostart=true\n\
+autorestart=true\n\
+startsecs=30\n\
+startretries=5\n\
+stdout_logfile=/app/logs/cache_warmer.log\n\
+stderr_logfile=/app/logs/cache_warmer_error.log\n\
+stdout_logfile_maxbytes=50MB\n\
+stderr_logfile_maxbytes=50MB\n\
+stdout_logfile_backups=2\n\
+stderr_logfile_backups=2\n\
+\n\
+[program:metrics_exporter]\n\
+command=python -c "\n\
+from prometheus_client import start_http_server, Counter, Histogram, Gauge\n\
+import time\n\
+import psutil\n\
+import os\n\
+\n\
+# Start metrics server\n\
+start_http_server(9090)\n\
+print(\"Scanner service metrics server started on port 9090\")\n\
+\n\
+# Create metrics\n\
+scans_total = Counter(\"scanner_scans_total\", \"Total scans completed\")\n\
+candidates_selected = Counter(\"scanner_candidates_selected_total\", \"Total candidates selected\")\n\
+scan_duration = Histogram(\"scanner_scan_duration_seconds\", \"Time spent scanning\")\n\
+universe_size = Gauge(\"scanner_universe_size\", \"Number of securities in scan universe\")\n\
+memory_usage = Gauge(\"scanner_memory_usage_bytes\", \"Memory usage\")\n\
+cpu_usage = Gauge(\"scanner_cpu_usage_percent\", \"CPU usage percentage\")\n\
+\n\
+while True:\n\
+    try:\n\
+        # Update system metrics\n\
+        process = psutil.Process(os.getpid())\n\
+        memory_usage.set(process.memory_info().rss)\n\
+        cpu_usage.set(process.cpu_percent())\n\
+        time.sleep(60)\n\
+    except Exception as e:\n\
+        print(f\"Metrics error: {e}\")\n\
+        time.sleep(60)\n\
+"\n\
+directory=/app\n\
+user=trading\n\
+autostart=true\n\
+autorestart=true\n\
+stdout_logfile=/app/logs/metrics.log\n\
+stderr_logfile=/app/logs/metrics_error.log' > /etc/supervisor/conf.d/scanner.conf
+
+# Switch to non-root user
+USER trading
+
+# Create log files with proper permissions
+RUN touch /app/logs/scanner.log \
+    /app/logs/scanner_error.log \
+    /app/logs/access.log \
+    /app/logs/error.log \
+    /app/logs/cache_warmer.log \
+    /app/logs/cache_warmer_error.log \
+    /app/logs/metrics.log \
+    /app/logs/metrics_error.log \
+    /app/logs/supervisord.log
+
+# Health check configuration (longer timeout for scan operations)
+HEALTHCHECK --interval=30s --timeout=15s --start-period=120s --retries=3 \
+    CMD /app/healthcheck.sh
+
+# Expose ports
+EXPOSE 5001 9090
+
+# Set volumes for persistent data
+VOLUME ["/app/logs", "/app/cache"]
+
+# Default command
+CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/supervisord.conf"]
+
+# =============================================================================
+# BUILD INSTRUCTIONS
+# =============================================================================
+# 
+# Build command:
+# docker build -f Dockerfile.scanner -t catalyst-scanner:latest .
+#
+# Run command (for testing):
+# docker run -d \
+#   --name catalyst-scanner \
+#   -p 5001:5001 \
+#   -p 9090:9090 \
+#   -e DATABASE_URL="postgresql://user:pass@host:port/db" \
+#   -e REDIS_URL="redis://redis:6379" \
+#   -e NEWS_SERVICE_URL="http://news-service:5008" \
+#   -e COORDINATION_URL="http://coordination-service:5000" \
+#   -v scanner_logs:/app/logs \
+#   -v scanner_cache:/app/cache \
+#   catalyst-scanner:latest
+#
+# =============================================================================
+# CONTAINER SPECIFICATIONS
+# =============================================================================
+#
+# Resource Requirements:
+# - Memory: 1GB (with 512MB minimum) - Heavy processing for 100+ securities
+# - CPU: 1.0 cores - Intensive calculations for catalyst scoring
+# - Storage: 2GB (logs, cache, and market data)
+# - Network: 5001 (HTTP API), 9090 (Prometheus metrics)
+#
+# Environment Variables Required:
+# - DATABASE_URL: PostgreSQL connection string
+# - REDIS_URL: Redis connection string
+# - NEWS_SERVICE_URL: News collection service URL
+# - COORDINATION_URL: Coordination service URL (for registration)
+# - LOG_LEVEL: Logging level (default: INFO)
+#
+# Optional Environment Variables:
+# - MIN_PRICE: Minimum stock price (default: 1.0)
+# - MAX_PRICE: Maximum stock price (default: 500.0)
+# - MIN_VOLUME: Minimum volume threshold (default: 500000)
+# - MIN_CATALYST_SCORE: Minimum catalyst score (default: 30)
+# - UNIVERSE_SIZE: Initial universe size (default: 100)
+# - FINAL_PICKS: Number of final candidates (default: 5)
+#
+# Features:
+# - Dynamic universe selection from most active stocks
+# - News catalyst integration and scoring
+# - Multi-stage filtering (100 → 20 → 5)
+# - Pre-market focused scanning
+# - Technical validation with price/volume
+# - Market data caching and pre-warming
+# - Comprehensive metrics and monitoring
+# - Non-root security
+# - Automatic dependency detection
+# - Graceful degradation on service failures
+#
+# Scanning Process:
+# 1. Collect top 100 most active securities
+# 2. Score by news catalysts (source tier + recency + keywords)
+# 3. Apply technical filters (price, volume, momentum)
+# 4. Select top 20 for pattern analysis
+# 5. Final ranking to top 5 picks
+#
+# =============================================================================

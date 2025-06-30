@@ -1,0 +1,427 @@
+# =============================================================================
+# CATALYST TRADING SYSTEM - NEWS COLLECTION SERVICE DOCKERFILE
+# Gathers market intelligence from multiple news sources
+# =============================================================================
+
+FROM python:3.10-slim
+
+# Set metadata
+LABEL maintainer="Catalyst Trading System"
+LABEL version="2.0.0"
+LABEL service="news_collection"
+LABEL description="Collects and processes financial news from multiple sources"
+
+# Set environment variables
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONPATH=/app
+ENV PORT=5008
+ENV SERVICE_NAME=news_collection
+
+# Set working directory
+WORKDIR /app
+
+# Install system dependencies for news processing
+RUN apt-get update && apt-get install -y \
+    # Build essentials
+    gcc \
+    g++ \
+    make \
+    # Database client
+    postgresql-client \
+    # Network utilities for API calls
+    curl \
+    wget \
+    # SSL certificates for HTTPS requests
+    ca-certificates \
+    # Text processing libraries
+    libxml2-dev \
+    libxslt1-dev \
+    # Language processing
+    libc6-dev \
+    # Process management
+    supervisor \
+    # Cleanup
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/* \
+    && rm -rf /tmp/* \
+    && rm -rf /var/tmp/*
+
+# Create non-root user for security
+RUN groupadd -r trading && useradd -r -g trading trading
+
+# Copy requirements and install Python dependencies
+COPY requirements.txt .
+
+# Install Python packages with optimizations for news processing
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
+    pip install --no-cache-dir -r requirements.txt && \
+    # Download NLTK data for text processing
+    python -c "import nltk; nltk.download('punkt'); nltk.download('stopwords'); nltk.download('vader_lexicon')" && \
+    # Clean up pip cache
+    pip cache purge
+
+# Create necessary directories
+RUN mkdir -p /app/logs /app/data /app/config /app/cache && \
+    chown -R trading:trading /app
+
+# Copy service source code
+COPY news-service-v200.py ./news_service.py
+COPY database_utils.py ./database_utils.py
+
+# Copy configuration files
+COPY config/ ./config/
+
+# Create RSS feed cache directory
+RUN mkdir -p /app/cache/rss && \
+    chown -R trading:trading /app/cache
+
+# Create health check script
+RUN echo '#!/bin/bash\n\
+# Health check with retry logic\n\
+for i in {1..3}; do\n\
+    if curl -f --max-time 5 http://localhost:${PORT}/health; then\n\
+        echo "Health check passed"\n\
+        exit 0\n\
+    fi\n\
+    echo "Health check attempt $i failed, retrying..."\n\
+    sleep 2\n\
+done\n\
+echo "Health check failed after 3 attempts"\n\
+exit 1' > /app/healthcheck.sh && \
+    chmod +x /app/healthcheck.sh && \
+    chown trading:trading /app/healthcheck.sh
+
+# Create startup script with enhanced error handling
+RUN echo '#!/bin/bash\n\
+set -e\n\
+\n\
+echo "=== Starting News Collection Service v2.0.0 ==="\n\
+\n\
+# Wait for database to be ready\n\
+echo "Waiting for database connection..."\n\
+DB_RETRY_COUNT=0\n\
+MAX_DB_RETRIES=30\n\
+while ! pg_isready -d "$DATABASE_URL" > /dev/null 2>&1; do\n\
+    DB_RETRY_COUNT=$((DB_RETRY_COUNT + 1))\n\
+    if [ $DB_RETRY_COUNT -ge $MAX_DB_RETRIES ]; then\n\
+        echo "Database connection failed after $MAX_DB_RETRIES attempts"\n\
+        exit 1\n\
+    fi\n\
+    echo "Database not ready (attempt $DB_RETRY_COUNT/$MAX_DB_RETRIES), waiting..."\n\
+    sleep 2\n\
+done\n\
+echo "Database connection established!"\n\
+\n\
+# Wait for Redis to be ready\n\
+echo "Waiting for Redis connection..."\n\
+REDIS_RETRY_COUNT=0\n\
+MAX_REDIS_RETRIES=15\n\
+until redis-cli -u "$REDIS_URL" ping > /dev/null 2>&1; do\n\
+    REDIS_RETRY_COUNT=$((REDIS_RETRY_COUNT + 1))\n\
+    if [ $REDIS_RETRY_COUNT -ge $MAX_REDIS_RETRIES ]; then\n\
+        echo "Redis connection failed after $MAX_REDIS_RETRIES attempts"\n\
+        exit 1\n\
+    fi\n\
+    echo "Redis not ready (attempt $REDIS_RETRY_COUNT/$MAX_REDIS_RETRIES), waiting..."\n\
+    sleep 2\n\
+done\n\
+echo "Redis connection established!"\n\
+\n\
+# Test API keys if provided\n\
+echo "Testing API configurations..."\n\
+python -c "\n\
+import os\n\
+import requests\n\
+\n\
+# Test NewsAPI if key provided\n\
+if os.getenv(\"NEWSAPI_KEY\"):\n\
+    try:\n\
+        resp = requests.get(\"https://newsapi.org/v2/top-headlines?country=us&apiKey=\" + os.getenv(\"NEWSAPI_KEY\"), timeout=10)\n\
+        if resp.status_code == 200:\n\
+            print(\"✓ NewsAPI key is valid\")\n\
+        else:\n\
+            print(f\"⚠ NewsAPI key issue: HTTP {resp.status_code}\")\n\
+    except Exception as e:\n\
+        print(f\"⚠ NewsAPI test failed: {e}\")\n\
+else:\n\
+    print(\"ℹ NewsAPI key not provided\")\n\
+\n\
+# Test Alpha Vantage if key provided\n\
+if os.getenv(\"ALPHAVANTAGE_KEY\"):\n\
+    try:\n\
+        resp = requests.get(\"https://www.alphavantage.co/query?function=TIME_SERIES_INTRADAY&symbol=AAPL&interval=1min&apikey=\" + os.getenv(\"ALPHAVANTAGE_KEY\"), timeout=10)\n\
+        if resp.status_code == 200 and \"Error Message\" not in resp.text:\n\
+            print(\"✓ Alpha Vantage key is valid\")\n\
+        else:\n\
+            print(f\"⚠ Alpha Vantage key issue\")\n\
+    except Exception as e:\n\
+        print(f\"⚠ Alpha Vantage test failed: {e}\")\n\
+else:\n\
+    print(\"ℹ Alpha Vantage key not provided\")\n\
+\n\
+print(\"API configuration check complete\")\n\
+"\n\
+\n\
+# Initialize news database tables if needed\n\
+echo "Initializing news database schema..."\n\
+python -c "\n\
+import os\n\
+import psycopg2\n\
+\n\
+try:\n\
+    conn = psycopg2.connect(os.getenv(\"DATABASE_URL\"))\n\
+    cur = conn.cursor()\n\
+    \n\
+    # Check if news_raw table exists\n\
+    cur.execute(\"SELECT COUNT(*) FROM information_schema.tables WHERE table_name = \"\"news_raw\"\"\")\n\
+    if cur.fetchone()[0] == 0:\n\
+        print(\"Creating news_raw table...\")\n\
+        # Basic table creation (full schema should be run separately)\n\
+        cur.execute(\"\"\"\n\
+            CREATE TABLE IF NOT EXISTS news_raw (\n\
+                id BIGSERIAL PRIMARY KEY,\n\
+                news_id VARCHAR(64) UNIQUE NOT NULL,\n\
+                symbol VARCHAR(10),\n\
+                headline TEXT NOT NULL,\n\
+                source VARCHAR(100) NOT NULL,\n\
+                published_timestamp TIMESTAMPTZ NOT NULL,\n\
+                collected_timestamp TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,\n\
+                content_snippet TEXT,\n\
+                metadata JSONB\n\
+            )\n\
+        \"\"\")\n\
+        conn.commit()\n\
+        print(\"Basic news_raw table created\")\n\
+    else:\n\
+        print(\"News database schema exists\")\n\
+    \n\
+    conn.close()\n\
+    print(\"Database initialization complete\")\n\
+    \n\
+except Exception as e:\n\
+    print(f\"Database initialization failed: {e}\")\n\
+    exit(1)\n\
+"\n\
+\n\
+# Start the news collection service\n\
+echo "Starting News Collection Service..."\n\
+echo "Configured news sources:"\n\
+echo "  - RSS Feeds: MarketWatch, Yahoo Finance, Seeking Alpha"\n\
+echo "  - NewsAPI: $([ -n \"$NEWSAPI_KEY\" ] && echo \"Enabled\" || echo \"Disabled\")"\n\
+echo "  - Alpha Vantage: $([ -n \"$ALPHAVANTAGE_KEY\" ] && echo \"Enabled\" || echo \"Disabled\")"\n\
+echo "  - Finnhub: $([ -n \"$FINNHUB_KEY\" ] && echo \"Enabled\" || echo \"Disabled\")"\n\
+\n\
+exec gunicorn --bind 0.0.0.0:${PORT} \\\n\
+    --workers 3 \\\n\
+    --worker-class gthread \\\n\
+    --threads 4 \\\n\
+    --worker-connections 1000 \\\n\
+    --max-requests 1000 \\\n\
+    --max-requests-jitter 100 \\\n\
+    --timeout 120 \\\n\
+    --keep-alive 2 \\\n\
+    --log-level info \\\n\
+    --access-logfile /app/logs/access.log \\\n\
+    --error-logfile /app/logs/error.log \\\n\
+    --capture-output \\\n\
+    --enable-stdio-inheritance \\\n\
+    news_service:app' > /app/start.sh && \
+    chmod +x /app/start.sh && \
+    chown trading:trading /app/start.sh
+
+# Create news collection scheduler script
+RUN echo '#!/bin/bash\n\
+# Automated news collection scheduler\n\
+while true; do\n\
+    echo "$(date): Starting scheduled news collection"\n\
+    \n\
+    # Determine collection frequency based on market hours\n\
+    current_hour=$(date +%H)\n\
+    \n\
+    if [ $current_hour -ge 4 ] && [ $current_hour -lt 9 ]; then\n\
+        # Pre-market: Every 5 minutes\n\
+        INTERVAL=300\n\
+        MODE="aggressive"\n\
+    elif [ $current_hour -ge 9 ] && [ $current_hour -lt 16 ]; then\n\
+        # Market hours: Every 30 minutes\n\
+        INTERVAL=1800\n\
+        MODE="normal"\n\
+    elif [ $current_hour -ge 16 ] && [ $current_hour -lt 20 ]; then\n\
+        # After hours: Every 60 minutes\n\
+        INTERVAL=3600\n\
+        MODE="light"\n\
+    else\n\
+        # Overnight: Every 4 hours\n\
+        INTERVAL=14400\n\
+        MODE="minimal"\n\
+    fi\n\
+    \n\
+    # Trigger collection via API\n\
+    curl -X POST "http://localhost:${PORT}/collect_news" \\\n\
+        -H "Content-Type: application/json" \\\n\
+        -d "{\"sources\": \"all\", \"mode\": \"$MODE\"}" \\\n\
+        --max-time 60 > /dev/null 2>&1\n\
+    \n\
+    echo "$(date): News collection completed, next run in ${INTERVAL} seconds"\n\
+    sleep $INTERVAL\n\
+done' > /app/scheduler.sh && \
+    chmod +x /app/scheduler.sh && \
+    chown trading:trading /app/scheduler.sh
+
+# Create supervisor configuration
+RUN echo '[supervisord]\n\
+nodaemon=true\n\
+user=trading\n\
+logfile=/app/logs/supervisord.log\n\
+pidfile=/app/logs/supervisord.pid\n\
+\n\
+[program:news_service]\n\
+command=/app/start.sh\n\
+directory=/app\n\
+user=trading\n\
+autostart=true\n\
+autorestart=true\n\
+startsecs=15\n\
+startretries=3\n\
+stdout_logfile=/app/logs/news.log\n\
+stderr_logfile=/app/logs/news_error.log\n\
+stdout_logfile_maxbytes=100MB\n\
+stderr_logfile_maxbytes=100MB\n\
+stdout_logfile_backups=3\n\
+stderr_logfile_backups=3\n\
+\n\
+[program:news_scheduler]\n\
+command=/app/scheduler.sh\n\
+directory=/app\n\
+user=trading\n\
+autostart=true\n\
+autorestart=true\n\
+startsecs=60\n\
+startretries=5\n\
+stdout_logfile=/app/logs/scheduler.log\n\
+stderr_logfile=/app/logs/scheduler_error.log\n\
+stdout_logfile_maxbytes=50MB\n\
+stderr_logfile_maxbytes=50MB\n\
+stdout_logfile_backups=2\n\
+stderr_logfile_backups=2\n\
+\n\
+[program:metrics_exporter]\n\
+command=python -c "\n\
+from prometheus_client import start_http_server, Counter, Histogram, Gauge\n\
+import time\n\
+import psutil\n\
+import os\n\
+\n\
+# Start metrics server\n\
+start_http_server(9090)\n\
+print(\"News service metrics server started on port 9090\")\n\
+\n\
+# Create metrics\n\
+articles_collected = Counter(\"news_articles_collected_total\", \"Total articles collected\")\n\
+collection_duration = Histogram(\"news_collection_duration_seconds\", \"Time spent collecting news\")\n\
+api_errors = Counter(\"news_api_errors_total\", \"API errors\", [\"source\"])\n\
+memory_usage = Gauge(\"news_memory_usage_bytes\", \"Memory usage\")\n\
+\n\
+while True:\n\
+    try:\n\
+        # Update memory usage\n\
+        process = psutil.Process(os.getpid())\n\
+        memory_usage.set(process.memory_info().rss)\n\
+        time.sleep(60)\n\
+    except Exception as e:\n\
+        print(f\"Metrics error: {e}\")\n\
+        time.sleep(60)\n\
+"\n\
+directory=/app\n\
+user=trading\n\
+autostart=true\n\
+autorestart=true\n\
+stdout_logfile=/app/logs/metrics.log\n\
+stderr_logfile=/app/logs/metrics_error.log' > /etc/supervisor/conf.d/news.conf
+
+# Switch to non-root user
+USER trading
+
+# Create log files with proper permissions
+RUN touch /app/logs/news.log \
+    /app/logs/news_error.log \
+    /app/logs/access.log \
+    /app/logs/error.log \
+    /app/logs/scheduler.log \
+    /app/logs/scheduler_error.log \
+    /app/logs/metrics.log \
+    /app/logs/metrics_error.log \
+    /app/logs/supervisord.log
+
+# Health check configuration
+HEALTHCHECK --interval=30s --timeout=10s --start-period=90s --retries=3 \
+    CMD /app/healthcheck.sh
+
+# Expose ports
+EXPOSE 5008 9090
+
+# Set volumes for persistent data
+VOLUME ["/app/logs", "/app/cache"]
+
+# Default command
+CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/supervisord.conf"]
+
+# =============================================================================
+# BUILD INSTRUCTIONS
+# =============================================================================
+# 
+# Build command:
+# docker build -f Dockerfile.news -t catalyst-news:latest .
+#
+# Run command (for testing):
+# docker run -d \
+#   --name catalyst-news \
+#   -p 5008:5008 \
+#   -p 9090:9090 \
+#   -e DATABASE_URL="postgresql://user:pass@host:port/db" \
+#   -e REDIS_URL="redis://redis:6379" \
+#   -e NEWSAPI_KEY="your_newsapi_key" \
+#   -e ALPHAVANTAGE_KEY="your_alphavantage_key" \
+#   -e FINNHUB_KEY="your_finnhub_key" \
+#   -v news_logs:/app/logs \
+#   -v news_cache:/app/cache \
+#   catalyst-news:latest
+#
+# =============================================================================
+# CONTAINER SPECIFICATIONS
+# =============================================================================
+#
+# Resource Requirements:
+# - Memory: 512MB (with 256MB minimum)
+# - CPU: 0.5 cores
+# - Storage: 2GB (logs, cache, and temporary data)
+# - Network: 5008 (HTTP API), 9090 (Prometheus metrics)
+#
+# Environment Variables Required:
+# - DATABASE_URL: PostgreSQL connection string
+# - REDIS_URL: Redis connection string
+# - NEWSAPI_KEY: NewsAPI.org API key (optional)
+# - ALPHAVANTAGE_KEY: Alpha Vantage API key (optional)
+# - FINNHUB_KEY: Finnhub API key (optional)
+# - LOG_LEVEL: Logging level (default: INFO)
+#
+# Features:
+# - Multi-source news collection (RSS, APIs)
+# - Automated scheduling based on market hours
+# - NLTK text processing capabilities
+# - API key validation and testing
+# - Comprehensive error handling
+# - Prometheus metrics export
+# - Non-root security
+# - Cache management for RSS feeds
+# - Source reliability tracking
+# - Rate limiting compliance
+#
+# Scheduled Collection:
+# - Pre-market (4-9:30 AM): Every 5 minutes
+# - Market hours (9:30 AM-4 PM): Every 30 minutes  
+# - After hours (4-8 PM): Every 60 minutes
+# - Overnight (8 PM-4 AM): Every 4 hours
+#
+# =============================================================================
