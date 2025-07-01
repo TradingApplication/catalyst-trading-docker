@@ -4,10 +4,10 @@
 -- =============================================================================
 
 -- Create database if it doesn't exist (run manually on DigitalOcean)
--- CREATE DATABASE catalyst_trading;
+-- CREATE DATABASE defaultdb;
 
 -- Connect to the database
-\c catalyst_trading;
+\c defaultdb;
 
 -- Enable required extensions
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
@@ -15,7 +15,7 @@ CREATE EXTENSION IF NOT EXISTS "pg_stat_statements";
 CREATE EXTENSION IF NOT EXISTS "btree_gin";
 
 -- Set timezone for consistency
-SET timezone = 'UTC';
+SET timezone = 'Asia/Perth';
 
 -- =============================================================================
 -- NEWS & INTELLIGENCE TABLES
