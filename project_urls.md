@@ -2,11 +2,12 @@
 
 **Repository:** [TradingApplication/catalyst-trading-docker](https://github.com/TradingApplication/catalyst-trading-docker)
 **Branch:** main
-**Generated:** 2025-07-01 03:51:47
+**Generated:** 2025-07-01 23:42:25
 
 ## Key Configuration Files
 
 - [docker-compose.yml](https://github.com/TradingApplication/catalyst-trading-docker/blob/main/docker-compose.yml) ([raw](https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/main/docker-compose.yml))
+- [requirements.txt](https://github.com/TradingApplication/catalyst-trading-docker/blob/main/requirements.txt) ([raw](https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/main/requirements.txt))
 - [nginx/ssl/nginx.conf](https://github.com/TradingApplication/catalyst-trading-docker/blob/main/nginx/ssl/nginx.conf) ([raw](https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/main/nginx/ssl/nginx.conf))
 - [monitoring/prometheus.yml](https://github.com/TradingApplication/catalyst-trading-docker/blob/main/monitoring/prometheus.yml) ([raw](https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/main/monitoring/prometheus.yml))
 - [prometheus.yml](https://github.com/TradingApplication/catalyst-trading-docker/blob/main/prometheus.yml) ([raw](https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/main/prometheus.yml))
@@ -29,17 +30,24 @@
 ### Python
 
 - [coordination_service.py](https://github.com/TradingApplication/catalyst-trading-docker/blob/main/coordination_service.py) ([raw](https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/main/coordination_service.py))
+- [coordination_service_v200.py](https://github.com/TradingApplication/catalyst-trading-docker/blob/main/coordination_service_v200.py) ([raw](https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/main/coordination_service_v200.py))
 - [dashboard_service.py](https://github.com/TradingApplication/catalyst-trading-docker/blob/main/dashboard_service.py) ([raw](https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/main/dashboard_service.py))
+- [dashboard_service_v100.py](https://github.com/TradingApplication/catalyst-trading-docker/blob/main/dashboard_service_v100.py) ([raw](https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/main/dashboard_service_v100.py))
 - [database_utils.py](https://github.com/TradingApplication/catalyst-trading-docker/blob/main/database_utils.py) ([raw](https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/main/database_utils.py))
 - [list_repo_files.py](https://github.com/TradingApplication/catalyst-trading-docker/blob/main/list_repo_files.py) ([raw](https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/main/list_repo_files.py))
 - [news_service.py](https://github.com/TradingApplication/catalyst-trading-docker/blob/main/news_service.py) ([raw](https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/main/news_service.py))
 - [pattern_service.py](https://github.com/TradingApplication/catalyst-trading-docker/blob/main/pattern_service.py) ([raw](https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/main/pattern_service.py))
+- [pattern_service_200.py](https://github.com/TradingApplication/catalyst-trading-docker/blob/main/pattern_service_200.py) ([raw](https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/main/pattern_service_200.py))
 - [reporting_service.py](https://github.com/TradingApplication/catalyst-trading-docker/blob/main/reporting_service.py) ([raw](https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/main/reporting_service.py))
+- [reporting_service_v200.py](https://github.com/TradingApplication/catalyst-trading-docker/blob/main/reporting_service_v200.py) ([raw](https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/main/reporting_service_v200.py))
 - [scanner_service.py](https://github.com/TradingApplication/catalyst-trading-docker/blob/main/scanner_service.py) ([raw](https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/main/scanner_service.py))
+- [scanner_service_v200.py](https://github.com/TradingApplication/catalyst-trading-docker/blob/main/scanner_service_v200.py) ([raw](https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/main/scanner_service_v200.py))
 - [scripts/migrate_data.py](https://github.com/TradingApplication/catalyst-trading-docker/blob/main/scripts/migrate_data.py) ([raw](https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/main/scripts/migrate_data.py))
 - [scripts/path_config.py](https://github.com/TradingApplication/catalyst-trading-docker/blob/main/scripts/path_config.py) ([raw](https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/main/scripts/path_config.py))
 - [technical_service.py](https://github.com/TradingApplication/catalyst-trading-docker/blob/main/technical_service.py) ([raw](https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/main/technical_service.py))
+- [technical_service_v200.py](https://github.com/TradingApplication/catalyst-trading-docker/blob/main/technical_service_v200.py) ([raw](https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/main/technical_service_v200.py))
 - [trading_service.py](https://github.com/TradingApplication/catalyst-trading-docker/blob/main/trading_service.py) ([raw](https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/main/trading_service.py))
+- [trading_service_v200.py](https://github.com/TradingApplication/catalyst-trading-docker/blob/main/trading_service_v200.py) ([raw](https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/main/trading_service_v200.py))
 
 ### Docker
 
@@ -78,19 +86,18 @@
 - [README.md](https://github.com/TradingApplication/catalyst-trading-docker/blob/main/README.md) ([raw](https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/main/README.md))
 - [project_urls.md](https://github.com/TradingApplication/catalyst-trading-docker/blob/main/project_urls.md) ([raw](https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/main/project_urls.md))
 - [project_urls.txt](https://github.com/TradingApplication/catalyst-trading-docker/blob/main/project_urls.txt) ([raw](https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/main/project_urls.txt))
-- [requirements-coordination.txt](https://github.com/TradingApplication/catalyst-trading-docker/blob/main/requirements-coordination.txt) ([raw](https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/main/requirements-coordination.txt))
-- [requirements-full.txt](https://github.com/TradingApplication/catalyst-trading-docker/blob/main/requirements-full.txt) ([raw](https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/main/requirements-full.txt))
-- [requirements-paper-trading.txt](https://github.com/TradingApplication/catalyst-trading-docker/blob/main/requirements-paper-trading.txt) ([raw](https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/main/requirements-paper-trading.txt))
-- [requirements-pattern-analysis.txt](https://github.com/TradingApplication/catalyst-trading-docker/blob/main/requirements-pattern-analysis.txt) ([raw](https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/main/requirements-pattern-analysis.txt))
-- [requirements-reporting.txt](https://github.com/TradingApplication/catalyst-trading-docker/blob/main/requirements-reporting.txt) ([raw](https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/main/requirements-reporting.txt))
-- [requirements-technical-analysis.txt](https://github.com/TradingApplication/catalyst-trading-docker/blob/main/requirements-technical-analysis.txt) ([raw](https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/main/requirements-technical-analysis.txt))
+- [requirements.txt](https://github.com/TradingApplication/catalyst-trading-docker/blob/main/requirements.txt) ([raw](https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/main/requirements.txt))
 
 ### Scripts
 
+- [Implementation/start_catalyst.sh](https://github.com/TradingApplication/catalyst-trading-docker/blob/main/Implementation/start_catalyst.sh) ([raw](https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/main/Implementation/start_catalyst.sh))
+- [git_diagnosis.sh](https://github.com/TradingApplication/catalyst-trading-docker/blob/main/git_diagnosis.sh) ([raw](https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/main/git_diagnosis.sh))
+- [git_fix_commands.sh](https://github.com/TradingApplication/catalyst-trading-docker/blob/main/git_fix_commands.sh) ([raw](https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/main/git_fix_commands.sh))
 - [scripts/catalyst_setup_budget.sh](https://github.com/TradingApplication/catalyst-trading-docker/blob/main/scripts/catalyst_setup_budget.sh) ([raw](https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/main/scripts/catalyst_setup_budget.sh))
 - [scripts/deploy.sh](https://github.com/TradingApplication/catalyst-trading-docker/blob/main/scripts/deploy.sh) ([raw](https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/main/scripts/deploy.sh))
 - [scripts/server-setup.sh](https://github.com/TradingApplication/catalyst-trading-docker/blob/main/scripts/server-setup.sh) ([raw](https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/main/scripts/server-setup.sh))
 - [scripts/start_script.sh](https://github.com/TradingApplication/catalyst-trading-docker/blob/main/scripts/start_script.sh) ([raw](https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/main/scripts/start_script.sh))
+- [start_catalyst.sh](https://github.com/TradingApplication/catalyst-trading-docker/blob/main/start_catalyst.sh) ([raw](https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/main/start_catalyst.sh))
 
 ### Data
 
@@ -99,4 +106,5 @@
 
 ### Other
 
-- [Docs/Access - DigitalOcean Cloud](https://github.com/TradingApplication/catalyst-trading-docker/blob/main/Docs/Access - DigitalOcean Cloud) ([raw](https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/main/Docs/Access - DigitalOcean Cloud))
+- [Docs/Access - Git - DigitalOcean](https://github.com/TradingApplication/catalyst-trading-docker/blob/main/Docs/Access - Git - DigitalOcean) ([raw](https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/main/Docs/Access - Git - DigitalOcean))
+- [news_service_.v200py](https://github.com/TradingApplication/catalyst-trading-docker/blob/main/news_service_.v200py) ([raw](https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/main/news_service_.v200py))

@@ -1,7 +1,7 @@
 GitHub Repository URLs for Direct Access
 Repository: TradingApplication/catalyst-trading-docker
 Branch: main
-Generated: 2025-07-01 03:51:47
+Generated: 2025-07-01 23:42:25
 ================================================================================
 
 RAW URLS (for Claude/API access):
@@ -33,8 +33,8 @@ https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/mai
 Dockerfile.trading
 https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/main/Dockerfile.trading
 
-Docs/Access - DigitalOcean Cloud
-https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/main/Docs/Access - DigitalOcean Cloud
+Docs/Access - Git - DigitalOcean
+https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/main/Docs/Access - Git - DigitalOcean
 
 Docs/Admin - SSH Key for DigitalOcean D.txt
 https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/main/Docs/Admin - SSH Key for DigitalOcean D.txt
@@ -72,14 +72,23 @@ https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/mai
 Implementation/Catalyst Trading System - Implementation Plan v200.md
 https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/main/Implementation/Catalyst Trading System - Implementation Plan v200.md
 
+Implementation/start_catalyst.sh
+https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/main/Implementation/start_catalyst.sh
+
 README.md
 https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/main/README.md
 
 coordination_service.py
 https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/main/coordination_service.py
 
+coordination_service_v200.py
+https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/main/coordination_service_v200.py
+
 dashboard_service.py
 https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/main/dashboard_service.py
+
+dashboard_service_v100.py
+https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/main/dashboard_service_v100.py
 
 database/schema.sql
 https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/main/database/schema.sql
@@ -89,6 +98,12 @@ https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/mai
 
 docker-compose.yml
 https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/main/docker-compose.yml
+
+git_diagnosis.sh
+https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/main/git_diagnosis.sh
+
+git_fix_commands.sh
+https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/main/git_fix_commands.sh
 
 init_database.sql
 https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/main/init_database.sql
@@ -105,11 +120,17 @@ https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/mai
 news_service.py
 https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/main/news_service.py
 
+news_service_.v200py
+https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/main/news_service_.v200py
+
 nginx/ssl/nginx.conf
 https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/main/nginx/ssl/nginx.conf
 
 pattern_service.py
 https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/main/pattern_service.py
+
+pattern_service_200.py
+https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/main/pattern_service_200.py
 
 project_urls.md
 https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/main/project_urls.md
@@ -123,26 +144,17 @@ https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/mai
 reporting_service.py
 https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/main/reporting_service.py
 
-requirements-coordination.txt
-https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/main/requirements-coordination.txt
+reporting_service_v200.py
+https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/main/reporting_service_v200.py
 
-requirements-full.txt
-https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/main/requirements-full.txt
-
-requirements-paper-trading.txt
-https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/main/requirements-paper-trading.txt
-
-requirements-pattern-analysis.txt
-https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/main/requirements-pattern-analysis.txt
-
-requirements-reporting.txt
-https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/main/requirements-reporting.txt
-
-requirements-technical-analysis.txt
-https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/main/requirements-technical-analysis.txt
+requirements.txt
+https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/main/requirements.txt
 
 scanner_service.py
 https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/main/scanner_service.py
+
+scanner_service_v200.py
+https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/main/scanner_service_v200.py
 
 scripts/catalyst_setup_budget.sh
 https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/main/scripts/catalyst_setup_budget.sh
@@ -162,9 +174,18 @@ https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/mai
 scripts/start_script.sh
 https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/main/scripts/start_script.sh
 
+start_catalyst.sh
+https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/main/start_catalyst.sh
+
 technical_service.py
 https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/main/technical_service.py
 
+technical_service_v200.py
+https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/main/technical_service_v200.py
+
 trading_service.py
 https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/main/trading_service.py
+
+trading_service_v200.py
+https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/main/trading_service_v200.py
 
