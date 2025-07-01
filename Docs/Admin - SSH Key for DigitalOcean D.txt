@@ -1,0 +1,33 @@
+Creating SSH Key for DigitalOcean Droplet using VSCode
+Method 1: Using VSCode's Integrated Terminal
+Step 1: Open VSCode Terminal
+
+Open VSCode
+Press Ctrl + ``  (backtick) or View → Terminal
+
+Step 2: Generate SSH Key Pair
+bash# For Windows (PowerShell/Git Bash), macOS, or Linux
+ssh-keygen -t ed25519 -C "your_email@example.com" -f ~/.ssh/digitalocean_catalyst
+
+# If ed25519 isn't supported, use RSA
+ssh-keygen -t rsa -b 4096 -C "your_email@example.com" -f ~/.ssh/digitalocean_catalyst
+When prompted:
+
+Enter passphrase: (optional but recommended for security)
+Confirm passphrase: (repeat if you entered one)
+
+Step 3: Verify Key Creation
+bash# List your SSH keys
+ls -la ~/.ssh/
+
+# You should see:
+# digitalocean_catalyst     (private key)
+# digitalocean_catalyst.pub (public key)
+Step 4: View Your Public Key
+bash# Display the public key
+cat ~/.ssh/digitalocean_catalyst.pub
+
+# Or on Windows PowerShell
+Get-Content $HOME\.ssh\digitalocean_catalyst.pub
+Copy the entire output - it should look like:
+ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKx... your_email@example.com
