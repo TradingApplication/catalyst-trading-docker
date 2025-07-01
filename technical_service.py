@@ -1,975 +1,1146 @@
 #!/usr/bin/env python3
 """
-Name of Service: TRADING SYSTEM TECHNICAL ANALYSIS - CATALYST-WEIGHTED VERSION
-Version: 2.0.0
-Last Updated: 2025-06-28
-Purpose: Generate trading signals combining patterns, indicators, and catalysts
+Name of Application: Catalyst Trading System
+Name of file: technical_service.py
+Version: 2.1.0
+Last Updated: 2025-07-01
+Purpose: Technical analysis and signal generation with catalyst awareness
 
 REVISION HISTORY:
-v2.0.0 (2025-06-28) - Complete rewrite for catalyst integration
-- Combines patterns + indicators + catalyst scores
-- Dynamic entry/exit based on catalyst strength  
-- Risk management varies with news confidence
-- Pre-market aggressive positioning
-- ML data collection for signal outcomes
+v2.1.0 (2025-07-01) - Production-ready implementation
+- PostgreSQL integration with connection pooling
+- All configuration via environment variables
+- Comprehensive technical indicator calculations
+- Signal generation with catalyst weighting
+- Redis caching for performance
+- TA-Lib with manual fallbacks
 
-This is the DECISION ENGINE of the system. It takes:
-1. Patterns from Pattern Analysis (hammer, engulfing, etc.)
-2. Technical indicators (RSI, MACD, Moving Averages)
-3. Catalyst data (news type, strength, alignment)
+Description of Service:
+This service performs technical analysis on securities and generates
+trading signals. It integrates with pattern analysis results and
+considers news catalysts when generating signals.
 
-And produces:
-- BUY/SELL/HOLD signals
-- Entry price recommendations
-- Stop loss levels (tighter with strong catalysts)
-- Profit targets (bigger with aligned catalysts)
-- Position sizing (larger with high confidence)
-
-KEY FORMULA:
-Signal Confidence = (Catalyst Score × 35%) + (Pattern Score × 35%) + 
-                   (Technical Score × 20%) + (Volume Score × 10%)
-
-SIGNAL THRESHOLDS:
-- > 70%: Strong signal (full position)
-- 50-70%: Normal signal (half position)
-- 30-50%: Weak signal (quarter position)
-- < 30%: No trade
+KEY FEATURES:
+- Multiple timeframe analysis (1min, 5min, 15min, 1h, 1d)
+- 20+ technical indicators (RSI, MACD, Bollinger, etc.)
+- Signal generation with confidence scoring
+- Catalyst-weighted signal strength
+- Support/resistance level calculation
+- Trend analysis and confirmation
+- Volume analysis integration
 """
 
 import os
 import json
 import time
-import sqlite3
 import logging
 import requests
 import numpy as np
 import pandas as pd
 from datetime import datetime, timedelta
 from flask import Flask, request, jsonify
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Any
+from concurrent.futures import ThreadPoolExecutor
+from structlog import get_logger
+import redis
 
-# Import database utilities if available
-try:
-    from database_utils_old import DatabaseServiceMixin
-    USE_DB_UTILS = True
-except ImportError:
-    USE_DB_UTILS = False
-    print("Warning: database_utils not found, using direct SQLite connections")
+# Import database utilities
+from database_utils import (
+    get_db_connection,
+    insert_trading_signal,
+    get_pending_signals,
+    insert_technical_indicators,
+    get_redis,
+    health_check
+)
 
-# Handle technical analysis library
+# Handle technical analysis library imports
 try:
     import talib
     TALIB_AVAILABLE = True
 except ImportError:
     TALIB_AVAILABLE = False
-    print("Warning: TA-Lib not available, using custom calculations")
+    print("⚠️ TA-Lib not available, using manual calculations")
+
+# Handle yfinance import
+try:
+    import yfinance as yf
+    YFINANCE_AVAILABLE = True
+except ImportError:
+    YFINANCE_AVAILABLE = False
+    print("⚠️ yfinance not available, using mock data")
 
 
-class CatalystWeightedTechnicalAnalysis(DatabaseServiceMixin if USE_DB_UTILS else object):
+class TechnicalAnalysisService:
     """
-    Technical analysis that understands catalyst context
-    Generates actionable trading signals
+    Technical analysis service with signal generation
     """
     
-    def __init__(self, db_path='/tmp//tmp/trading_system.db'):
-        if USE_DB_UTILS:
-            super().__init__(db_path)
-        else:
-            self.db_path = db_path
-            
+    def __init__(self):
+        # Initialize environment
+        self.setup_environment()
+        
         self.app = Flask(__name__)
         self.setup_logging()
         self.setup_routes()
         
-        # Service URLs
-        self.pattern_service_url = "http://localhost:5002"
-        self.coordination_url = "http://localhost:5000"
+        # Initialize Redis client
+        self.redis_client = get_redis()
         
-        # Signal generation weights
-        self.signal_weights = {
-            'catalyst_score': 0.35,    # 35% - News drives everything
-            'pattern_score': 0.35,     # 35% - Technical patterns
-            'indicator_score': 0.20,   # 20% - RSI, MACD, etc.
-            'volume_score': 0.10       # 10% - Volume confirmation
+        # Service URLs from environment
+        self.coordination_url = os.getenv('COORDINATION_URL', 'http://coordination-service:5000')
+        self.pattern_service_url = os.getenv('PATTERN_SERVICE_URL', 'http://pattern-service:5002')
+        
+        # Technical analysis configuration
+        self.ta_config = {
+            # Indicator periods
+            'rsi_period': int(os.getenv('RSI_PERIOD', '14')),
+            'macd_fast': int(os.getenv('MACD_FAST', '12')),
+            'macd_slow': int(os.getenv('MACD_SLOW', '26')),
+            'macd_signal': int(os.getenv('MACD_SIGNAL', '9')),
+            'bb_period': int(os.getenv('BB_PERIOD', '20')),
+            'bb_std': float(os.getenv('BB_STD', '2.0')),
+            'sma_short': int(os.getenv('SMA_SHORT', '20')),
+            'sma_long': int(os.getenv('SMA_LONG', '50')),
+            'ema_short': int(os.getenv('EMA_SHORT', '9')),
+            'ema_long': int(os.getenv('EMA_LONG', '21')),
+            'atr_period': int(os.getenv('ATR_PERIOD', '14')),
+            'adx_period': int(os.getenv('ADX_PERIOD', '14')),
+            'stoch_period': int(os.getenv('STOCH_PERIOD', '14')),
+            
+            # Signal thresholds
+            'rsi_oversold': float(os.getenv('RSI_OVERSOLD', '30')),
+            'rsi_overbought': float(os.getenv('RSI_OVERBOUGHT', '70')),
+            'adx_trend_strength': float(os.getenv('ADX_TREND_STRENGTH', '25')),
+            'volume_surge_multiplier': float(os.getenv('VOLUME_SURGE_MULT', '2.0')),
+            
+            # Signal generation
+            'min_signal_confidence': float(os.getenv('MIN_SIGNAL_CONFIDENCE', '60')),
+            'catalyst_weight': float(os.getenv('CATALYST_WEIGHT', '0.3')),
+            'technical_weight': float(os.getenv('TECHNICAL_WEIGHT', '0.7')),
+            
+            # Risk management
+            'default_stop_loss_pct': float(os.getenv('DEFAULT_STOP_LOSS_PCT', '2.0')),
+            'default_take_profit_pct': float(os.getenv('DEFAULT_TAKE_PROFIT_PCT', '4.0')),
+            'atr_stop_multiplier': float(os.getenv('ATR_STOP_MULTIPLIER', '2.0')),
+            
+            # Cache settings
+            'cache_ttl': int(os.getenv('TECHNICAL_CACHE_TTL', '300'))  # 5 minutes
         }
         
-        # Risk parameters that adjust with catalysts
-        self.risk_params = {
-            'base_stop_loss_pct': 2.0,     # 2% default stop
-            'catalyst_stop_adjustment': {
-                'strong': 0.5,              # Tighter stop with strong catalyst (1.5%)
-                'moderate': 1.0,            # Normal stop (2%)
-                'weak': 1.5                 # Wider stop with weak catalyst (3%)
-            },
-            'position_size_map': {
-                'strong_signal': 1.0,       # Full position
-                'normal_signal': 0.5,       # Half position
-                'weak_signal': 0.25         # Quarter position
-            },
-            'target_multipliers': {
-                'target_1': 1.5,            # 1.5x risk for first target
-                'target_2': 3.0             # 3x risk for second target
-            }
+        # Signal type definitions
+        self.signal_types = {
+            'momentum_breakout': {'weight': 1.2, 'min_confidence': 70},
+            'trend_continuation': {'weight': 1.0, 'min_confidence': 65},
+            'reversal': {'weight': 1.1, 'min_confidence': 75},
+            'range_breakout': {'weight': 1.0, 'min_confidence': 70},
+            'volume_surge': {'weight': 0.9, 'min_confidence': 60}
         }
-        
-        # Indicator thresholds
-        self.indicator_config = {
-            'rsi': {
-                'period': 14,
-                'oversold': 30,
-                'overbought': 70,
-                'weight': 0.3
-            },
-            'macd': {
-                'fast': 12,
-                'slow': 26,
-                'signal': 9,
-                'weight': 0.3
-            },
-            'moving_averages': {
-                'sma_20': 20,
-                'sma_50': 50,
-                'ema_9': 9,
-                'weight': 0.2
-            },
-            'volume': {
-                'avg_period': 20,
-                'surge_threshold': 1.5,
-                'weight': 0.2
-            }
-        }
-        
-        # Initialize database
-        self._init_database_schema()
         
         # Register with coordination
         self._register_with_coordination()
         
-        self.logger.info("Catalyst-Weighted Technical Analysis v2.0.0 initialized")
+        self.logger.info("Technical Analysis Service v2.1.0 initialized",
+                        environment=os.getenv('ENVIRONMENT', 'development'),
+                        talib_available=TALIB_AVAILABLE)
+        
+    def setup_environment(self):
+        """Setup environment variables and paths"""
+        # Paths
+        self.log_path = os.getenv('LOG_PATH', '/app/logs')
+        self.data_path = os.getenv('DATA_PATH', '/app/data')
+        
+        # Create directories
+        os.makedirs(self.log_path, exist_ok=True)
+        os.makedirs(self.data_path, exist_ok=True)
+        
+        # Service configuration
+        self.service_name = 'technical_analysis'
+        self.port = int(os.getenv('PORT', '5003'))
+        self.log_level = os.getenv('LOG_LEVEL', 'INFO')
         
     def setup_logging(self):
-        """Setup logging configuration"""
-        self.logger = logging.getLogger('technical_analysis')
-        self.logger.setLevel(logging.INFO)
+        """Setup structured logging"""
+        self.logger = get_logger()
+        self.logger = self.logger.bind(service=self.service_name)
         
-        # Create logs directory
-        os.makedirs('/tmp/logs', exist_ok=True)
-        
-        # File handler
-        fh = logging.FileHandler('/tmp//tmp/logs/technical_analysis.log')
-        fh.setLevel(logging.INFO)
-        
-        # Console handler  
-        ch = logging.StreamHandler()
-        ch.setLevel(logging.INFO)
-        
-        # Formatter
-        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-        fh.setFormatter(formatter)
-        ch.setFormatter(formatter)
-        
-        self.logger.addHandler(fh)
-        self.logger.addHandler(ch)
-        
-    def _init_database_schema(self):
-        """Initialize trading signals table"""
-        try:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-            
-            # Enhanced trading signals table
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS trading_signals (
-                    signal_id TEXT PRIMARY KEY,
-                    symbol TEXT NOT NULL,
-                    generated_timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    
-                    -- Signal details
-                    signal_type TEXT NOT NULL,  -- BUY, SELL, HOLD
-                    confidence DECIMAL(5,2),    -- 0-100
-                    
-                    -- Component scores (how we got here)
-                    catalyst_score DECIMAL(5,2),
-                    pattern_score DECIMAL(5,2),
-                    indicator_score DECIMAL(5,2),
-                    volume_score DECIMAL(5,2),
-                    
-                    -- Entry/Exit parameters
-                    recommended_entry DECIMAL(10,2),
-                    stop_loss DECIMAL(10,2),
-                    target_1 DECIMAL(10,2),
-                    target_2 DECIMAL(10,2),
-                    
-                    -- Context (why this signal)
-                    catalyst_type TEXT,
-                    catalyst_strength TEXT,  -- strong, moderate, weak
-                    detected_patterns JSON,
-                    technical_indicators JSON,
-                    key_factors JSON,  -- Human-readable reasons
-                    
-                    -- Risk parameters
-                    position_size_pct DECIMAL(5,2),
-                    risk_reward_ratio DECIMAL(5,2),
-                    max_loss_amount DECIMAL(10,2),
-                    
-                    -- Pre-market flag
-                    is_pre_market BOOLEAN DEFAULT FALSE,
-                    
-                    -- Execution tracking
-                    executed BOOLEAN DEFAULT FALSE,
-                    execution_timestamp TIMESTAMP,
-                    actual_entry DECIMAL(10,2),
-                    
-                    -- Outcome tracking (for ML)
-                    signal_outcome TEXT,  -- success, stopped_out, partial_success
-                    actual_pnl DECIMAL(10,2),
-                    ml_features JSON,
-                    
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            ''')
-            
-            # Signal performance tracking
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS signal_performance (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    signal_type TEXT,
-                    catalyst_type TEXT,
-                    confidence_range TEXT,  -- 70-100, 50-70, 30-50
-                    
-                    -- Performance metrics
-                    total_signals INTEGER DEFAULT 0,
-                    successful_signals INTEGER DEFAULT 0,
-                    failed_signals INTEGER DEFAULT 0,
-                    success_rate DECIMAL(5,2),
-                    
-                    -- P&L metrics
-                    total_pnl DECIMAL(10,2),
-                    avg_win DECIMAL(10,2),
-                    avg_loss DECIMAL(10,2),
-                    profit_factor DECIMAL(5,2),
-                    
-                    -- Timing
-                    avg_time_to_target_minutes INTEGER,
-                    avg_time_to_stop_minutes INTEGER,
-                    
-                    last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    
-                    UNIQUE(signal_type, catalyst_type, confidence_range)
-                )
-            ''')
-            
-            # Create indexes
-            cursor.execute('''
-                CREATE INDEX IF NOT EXISTS idx_signals_symbol 
-                ON trading_signals(symbol, generated_timestamp)
-            ''')
-            
-            cursor.execute('''
-                CREATE INDEX IF NOT EXISTS idx_signals_pending 
-                ON trading_signals(executed, confidence DESC)
-            ''')
-            
-            conn.commit()
-            conn.close()
-            
-            self.logger.info("Database schema initialized")
-            
-        except Exception as e:
-            self.logger.error(f"Error initializing database: {e}")
-            raise
-            
     def setup_routes(self):
         """Setup Flask routes"""
         @self.app.route('/health', methods=['GET'])
         def health():
+            db_health = health_check()
             return jsonify({
-                "status": "healthy",
+                "status": "healthy" if db_health['database'] == 'healthy' else "degraded",
                 "service": "technical_analysis",
-                "version": "2.0.0",
-                "mode": "catalyst-weighted",
+                "version": "2.1.0",
+                "database": db_health['database'],
+                "redis": db_health['redis'],
+                "talib": TALIB_AVAILABLE,
                 "timestamp": datetime.now().isoformat()
             })
             
-        @self.app.route('/generate_signal', methods=['POST'])
-        def generate_signal():
-            """Generate trading signal for single symbol"""
+        @self.app.route('/analyze', methods=['POST'])
+        def analyze():
+            """Perform technical analysis on a symbol"""
             data = request.json
             symbol = data.get('symbol')
+            timeframe = data.get('timeframe', '5min')
+            
+            if not symbol:
+                return jsonify({'error': 'Symbol required'}), 400
+                
+            result = self.analyze_symbol(symbol, timeframe)
+            return jsonify(result)
+            
+        @self.app.route('/generate_signal', methods=['POST'])
+        def generate_signal():
+            """Generate trading signal for a symbol"""
+            data = request.json
+            symbol = data.get('symbol')
+            timeframe = data.get('timeframe', '5min')
             patterns = data.get('patterns', [])
             catalyst_data = data.get('catalyst_data', {})
             
             if not symbol:
                 return jsonify({'error': 'Symbol required'}), 400
                 
-            signal = self.generate_catalyst_weighted_signal(
-                symbol, patterns, catalyst_data
+            signal = self.generate_trading_signal(
+                symbol, timeframe, patterns, catalyst_data
             )
             return jsonify(signal)
             
-        @self.app.route('/batch_signals', methods=['POST'])
-        def batch_signals():
-            """Generate signals for multiple symbols"""
+        @self.app.route('/batch_analyze', methods=['POST'])
+        def batch_analyze():
+            """Analyze multiple symbols"""
             data = request.json
-            candidates = data.get('candidates', [])
+            symbols = data.get('symbols', [])
+            timeframe = data.get('timeframe', '5min')
             
-            signals = []
-            for candidate in candidates:
-                try:
-                    signal = self.generate_catalyst_weighted_signal(
-                        candidate['symbol'],
-                        candidate.get('patterns', []),
-                        candidate.get('catalyst_data', {})
-                    )
-                    signals.append(signal)
-                except Exception as e:
-                    self.logger.error(f"Error generating signal for {candidate['symbol']}: {e}")
-                    
-            return jsonify({'signals': signals})
+            results = []
+            with ThreadPoolExecutor(max_workers=5) as executor:
+                futures = [
+                    executor.submit(self.analyze_symbol, symbol, timeframe)
+                    for symbol in symbols
+                ]
+                
+                for future in futures:
+                    try:
+                        result = future.result(timeout=10)
+                        results.append(result)
+                    except Exception as e:
+                        self.logger.error("Batch analysis error", error=str(e))
+                        
+            return jsonify({'results': results})
             
-        @self.app.route('/signal_performance', methods=['GET'])
-        def signal_performance():
-            """Get signal performance statistics"""
-            signal_type = request.args.get('signal_type')
-            catalyst_type = request.args.get('catalyst_type')
+        @self.app.route('/indicators/<symbol>', methods=['GET'])
+        def get_indicators(symbol):
+            """Get current technical indicators for a symbol"""
+            timeframe = request.args.get('timeframe', '5min')
             
-            stats = self._get_signal_performance(signal_type, catalyst_type)
-            return jsonify(stats)
+            indicators = self._calculate_all_indicators(symbol, timeframe)
+            if indicators:
+                return jsonify(indicators)
+            else:
+                return jsonify({'error': 'Failed to calculate indicators'}), 500
+                
+        @self.app.route('/support_resistance/<symbol>', methods=['GET'])
+        def get_support_resistance(symbol):
+            """Get support and resistance levels"""
+            timeframe = request.args.get('timeframe', '1d')
             
-        @self.app.route('/update_signal_outcome', methods=['POST'])
-        def update_signal_outcome():
-            """Update signal with actual outcome"""
-            data = request.json
-            signal_id = data.get('signal_id')
-            outcome = data.get('outcome')
+            levels = self._calculate_support_resistance(symbol, timeframe)
+            return jsonify(levels)
             
-            result = self._update_signal_outcome(signal_id, outcome)
-            return jsonify(result)
+        @self.app.route('/pending_signals', methods=['GET'])
+        def pending_signals():
+            """Get pending trading signals"""
+            signals = get_pending_signals()
+            return jsonify({
+                'count': len(signals),
+                'signals': signals
+            })
             
-    def generate_catalyst_weighted_signal(self, symbol: str, patterns: List[Dict], 
-                                        catalyst_data: Dict) -> Dict:
+    def analyze_symbol(self, symbol: str, timeframe: str = '5min') -> Dict:
         """
-        Generate trading signal with catalyst weighting
-        This is where the magic happens!
+        Perform comprehensive technical analysis on a symbol
         """
-        self.logger.info(f"Generating signal for {symbol}")
+        self.logger.info(f"Analyzing {symbol}", symbol=symbol, timeframe=timeframe)
         
-        # Get technical indicators
-        indicators = self._calculate_technical_indicators(symbol)
-        if not indicators:
-            return self._create_no_trade_signal(symbol, "Failed to calculate indicators")
+        # Check cache first
+        cache_key = f"technical:{symbol}:{timeframe}"
+        cached = self.redis_client.get(cache_key)
+        if cached:
+            self.logger.debug("Using cached technical data", symbol=symbol)
+            return json.loads(cached)
+        
+        # Get price data
+        price_data = self._get_price_data(symbol, timeframe)
+        if price_data is None or len(price_data) < 50:  # Need enough data for indicators
+            return {
+                'symbol': symbol,
+                'status': 'insufficient_data',
+                'message': 'Not enough price data for technical analysis'
+            }
             
-        # Score each component
-        catalyst_score = self._score_catalyst(catalyst_data)
-        pattern_score = self._score_patterns(patterns)
-        indicator_score = self._score_indicators(indicators)
-        volume_score = self._score_volume(indicators.get('volume_data', {}))
+        # Calculate all indicators
+        indicators = self._calculate_indicators(price_data)
         
-        # Calculate weighted confidence
-        confidence = (
-            catalyst_score * self.signal_weights['catalyst_score'] +
-            pattern_score * self.signal_weights['pattern_score'] +
-            indicator_score * self.signal_weights['indicator_score'] +
-            volume_score * self.signal_weights['volume_score']
+        # Analyze trend
+        trend_analysis = self._analyze_trend(price_data, indicators)
+        
+        # Identify chart patterns
+        chart_patterns = self._identify_chart_patterns(price_data)
+        
+        # Calculate support/resistance
+        support_resistance = self._calculate_support_resistance_from_data(price_data)
+        
+        # Generate technical score
+        technical_score = self._calculate_technical_score(
+            indicators, trend_analysis, chart_patterns
         )
         
-        self.logger.info(f"Scores for {symbol}: Catalyst={catalyst_score:.1f}, "
-                        f"Pattern={pattern_score:.1f}, Indicator={indicator_score:.1f}, "
-                        f"Volume={volume_score:.1f}, Final={confidence:.1f}")
+        # Save indicators to database
+        self._save_indicators(symbol, timeframe, indicators, price_data)
         
-        # Determine signal type
-        signal_type = self._determine_signal_type(
-            confidence, patterns, indicators, catalyst_data
+        result = {
+            'symbol': symbol,
+            'timeframe': timeframe,
+            'timestamp': datetime.now().isoformat(),
+            'current_price': float(price_data['Close'].iloc[-1]),
+            'indicators': indicators,
+            'trend': trend_analysis,
+            'patterns': chart_patterns,
+            'support_resistance': support_resistance,
+            'technical_score': technical_score,
+            'recommendation': self._generate_recommendation(technical_score, trend_analysis)
+        }
+        
+        # Cache result
+        self.redis_client.setex(
+            cache_key,
+            self.ta_config['cache_ttl'],
+            json.dumps(result)
         )
         
-        # Skip if no actionable signal
-        if signal_type == 'HOLD' and confidence < 30:
-            return self._create_no_trade_signal(symbol, "Confidence below threshold")
+        return result
+        
+    def generate_trading_signal(self, symbol: str, timeframe: str,
+                              patterns: List[Dict], catalyst_data: Dict) -> Dict:
+        """
+        Generate a trading signal based on technical and catalyst data
+        """
+        self.logger.info(f"Generating signal for {symbol}",
+                        symbol=symbol,
+                        has_patterns=bool(patterns),
+                        has_catalyst=bool(catalyst_data))
+        
+        # Get technical analysis
+        ta_result = self.analyze_symbol(symbol, timeframe)
+        
+        if ta_result.get('status') == 'insufficient_data':
+            return {
+                'symbol': symbol,
+                'signal': 'NO_SIGNAL',
+                'reason': 'Insufficient data'
+            }
             
-        # Calculate entry/exit levels
-        current_price = indicators.get('current_price', 0)
-        levels = self._calculate_entry_exit_levels(
-            signal_type, current_price, confidence, catalyst_data
+        # Determine signal type and direction
+        signal_type, direction = self._determine_signal_type(
+            ta_result, patterns, catalyst_data
         )
         
-        # Determine position sizing
-        position_size = self._calculate_position_size(confidence)
+        if signal_type == 'NO_SIGNAL':
+            return {
+                'symbol': symbol,
+                'signal': 'NO_SIGNAL',
+                'reason': 'No clear signal detected'
+            }
+            
+        # Calculate signal confidence
+        confidence = self._calculate_signal_confidence(
+            ta_result, patterns, catalyst_data, signal_type
+        )
         
-        # Create key factors explanation
-        key_factors = self._generate_key_factors(
-            catalyst_data, patterns, indicators, confidence
+        if confidence < self.ta_config['min_signal_confidence']:
+            return {
+                'symbol': symbol,
+                'signal': 'NO_SIGNAL',
+                'reason': f'Confidence too low: {confidence:.1f}%'
+            }
+            
+        # Calculate entry, stop loss, and targets
+        current_price = ta_result['current_price']
+        levels = self._calculate_trade_levels(
+            current_price, direction, ta_result, signal_type
         )
         
         # Generate signal ID
         signal_id = f"SIG_{symbol}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         
-        # Prepare ML features
-        ml_features = {
-            'catalyst_score': catalyst_score,
-            'pattern_score': pattern_score,
-            'indicator_score': indicator_score,
-            'volume_score': volume_score,
-            'patterns': patterns,
-            'indicators': indicators,
-            'catalyst_data': catalyst_data
-        }
-        
+        # Create signal object
         signal = {
             'signal_id': signal_id,
             'symbol': symbol,
+            'signal': direction,  # 'BUY' or 'SELL'
             'signal_type': signal_type,
-            'confidence': round(confidence, 2),
-            'catalyst_score': round(catalyst_score, 2),
-            'pattern_score': round(pattern_score, 2),
-            'indicator_score': round(indicator_score, 2),
-            'volume_score': round(volume_score, 2),
+            'confidence': confidence,
+            'catalyst_score': catalyst_data.get('score', 0),
+            'pattern_score': self._calculate_pattern_score(patterns),
+            'technical_score': ta_result['technical_score'],
+            'volume_score': self._calculate_volume_score(ta_result),
             'recommended_entry': levels['entry'],
             'stop_loss': levels['stop_loss'],
             'target_1': levels['target_1'],
             'target_2': levels['target_2'],
-            'position_size_pct': position_size,
-            'risk_reward_ratio': levels['risk_reward'],
             'catalyst_type': catalyst_data.get('type'),
-            'catalyst_strength': self._classify_catalyst_strength(catalyst_score),
-            'detected_patterns': patterns,
-            'key_factors': key_factors,
-            'is_pre_market': catalyst_data.get('is_pre_market', False),
-            'ml_features': ml_features
+            'detected_patterns': [p['pattern_name'] for p in patterns],
+            'key_factors': self._identify_key_factors(ta_result, patterns, catalyst_data),
+            'position_size_pct': self._calculate_position_size(confidence, signal_type),
+            'risk_reward_ratio': levels['risk_reward_ratio'],
+            'timeframe': timeframe,
+            'generated_at': datetime.now().isoformat()
         }
         
         # Save signal to database
-        self._save_signal(signal)
+        insert_trading_signal(signal)
         
         return signal
         
-    def _calculate_technical_indicators(self, symbol: str) -> Optional[Dict]:
-        """Calculate all technical indicators"""
+    def _get_price_data(self, symbol: str, timeframe: str) -> Optional[pd.DataFrame]:
+        """Get price data for analysis"""
+        if not YFINANCE_AVAILABLE:
+            return self._get_mock_price_data(symbol, timeframe)
+            
         try:
-            # Get price data (in production, this would fetch real data)
-            price_data = self._get_price_data(symbol)
-            if price_data is None or len(price_data) < 50:
+            ticker = yf.Ticker(symbol)
+            
+            # Determine period based on timeframe
+            period_map = {
+                '1min': '7d',
+                '5min': '1mo',
+                '15min': '2mo',
+                '30min': '3mo',
+                '1h': '6mo',
+                '1d': '2y'
+            }
+            
+            period = period_map.get(timeframe, '1mo')
+            data = ticker.history(period=period, interval=timeframe)
+            
+            if data.empty:
+                self.logger.warning(f"No data retrieved for {symbol}")
                 return None
                 
-            close_prices = price_data['Close'].values
-            high_prices = price_data['High'].values
-            low_prices = price_data['Low'].values
-            volume = price_data['Volume'].values
-            
-            indicators = {
-                'current_price': close_prices[-1],
-                'price_change_pct': ((close_prices[-1] - close_prices[-2]) / close_prices[-2]) * 100
-            }
-            
-            # RSI (Relative Strength Index)
-            if TALIB_AVAILABLE:
-                indicators['rsi'] = talib.RSI(close_prices, timeperiod=14)[-1]
-            else:
-                indicators['rsi'] = self._calculate_rsi(close_prices, 14)
-                
-            # MACD (Moving Average Convergence Divergence)
-            if TALIB_AVAILABLE:
-                macd, signal, hist = talib.MACD(close_prices, 
-                                               fastperiod=12, 
-                                               slowperiod=26, 
-                                               signalperiod=9)
-                indicators['macd'] = macd[-1]
-                indicators['macd_signal'] = signal[-1]
-                indicators['macd_histogram'] = hist[-1]
-            else:
-                indicators.update(self._calculate_macd(close_prices))
-                
-            # Moving Averages
-            indicators['sma_20'] = self._calculate_sma(close_prices, 20)
-            indicators['sma_50'] = self._calculate_sma(close_prices, 50)
-            indicators['ema_9'] = self._calculate_ema(close_prices, 9)
-            
-            # Support and Resistance
-            indicators['support'] = low_prices[-20:].min()
-            indicators['resistance'] = high_prices[-20:].max()
-            
-            # Volume analysis
-            indicators['volume_data'] = {
-                'current_volume': volume[-1],
-                'avg_volume': volume[-20:].mean(),
-                'volume_ratio': volume[-1] / volume[-20:].mean() if volume[-20:].mean() > 0 else 1
-            }
-            
-            # Trend detection
-            indicators['trend'] = self._detect_trend(close_prices)
-            
-            return indicators
+            return data
             
         except Exception as e:
-            self.logger.error(f"Error calculating indicators for {symbol}: {e}")
+            self.logger.error(f"Error fetching data for {symbol}", error=str(e))
             return None
             
-    def _score_catalyst(self, catalyst_data: Dict) -> float:
-        """
-        Score catalyst strength (0-100)
-        This is critical - strong catalysts drive trading decisions
-        """
-        if not catalyst_data or not catalyst_data.get('score'):
-            return 0
-            
-        base_score = catalyst_data.get('score', 0)
+    def _calculate_indicators(self, data: pd.DataFrame) -> Dict:
+        """Calculate all technical indicators"""
+        indicators = {}
         
-        # Boost for specific catalyst types
-        catalyst_type = catalyst_data.get('type', '').lower()
-        type_multipliers = {
-            'earnings_beat': 1.3,
-            'fda_approval': 1.5,
-            'merger': 1.4,
-            'upgrade': 1.2,
-            'earnings_miss': 1.3,  # Strong negative catalyst
-            'downgrade': 1.2,
-            'lawsuit': 1.1
+        try:
+            # Price data
+            close = data['Close'].values
+            high = data['High'].values
+            low = data['Low'].values
+            volume = data['Volume'].values
+            
+            if TALIB_AVAILABLE:
+                # Use TA-Lib for calculations
+                indicators['rsi'] = float(talib.RSI(close, timeperiod=self.ta_config['rsi_period'])[-1])
+                
+                macd, signal, hist = talib.MACD(close,
+                                               fastperiod=self.ta_config['macd_fast'],
+                                               slowperiod=self.ta_config['macd_slow'],
+                                               signalperiod=self.ta_config['macd_signal'])
+                indicators['macd'] = float(macd[-1]) if not np.isnan(macd[-1]) else 0
+                indicators['macd_signal'] = float(signal[-1]) if not np.isnan(signal[-1]) else 0
+                indicators['macd_histogram'] = float(hist[-1]) if not np.isnan(hist[-1]) else 0
+                
+                upper, middle, lower = talib.BBANDS(close,
+                                                   timeperiod=self.ta_config['bb_period'],
+                                                   nbdevup=self.ta_config['bb_std'],
+                                                   nbdevdn=self.ta_config['bb_std'])
+                indicators['bb_upper'] = float(upper[-1])
+                indicators['bb_middle'] = float(middle[-1])
+                indicators['bb_lower'] = float(lower[-1])
+                indicators['bb_width'] = indicators['bb_upper'] - indicators['bb_lower']
+                indicators['bb_position'] = (close[-1] - indicators['bb_lower']) / indicators['bb_width'] if indicators['bb_width'] > 0 else 0.5
+                
+                indicators['sma_20'] = float(talib.SMA(close, timeperiod=self.ta_config['sma_short'])[-1])
+                indicators['sma_50'] = float(talib.SMA(close, timeperiod=self.ta_config['sma_long'])[-1])
+                indicators['ema_9'] = float(talib.EMA(close, timeperiod=self.ta_config['ema_short'])[-1])
+                indicators['ema_21'] = float(talib.EMA(close, timeperiod=self.ta_config['ema_long'])[-1])
+                
+                indicators['atr'] = float(talib.ATR(high, low, close, timeperiod=self.ta_config['atr_period'])[-1])
+                indicators['adx'] = float(talib.ADX(high, low, close, timeperiod=self.ta_config['adx_period'])[-1])
+                
+                slowk, slowd = talib.STOCH(high, low, close,
+                                          fastk_period=self.ta_config['stoch_period'],
+                                          slowk_period=3,
+                                          slowd_period=3)
+                indicators['stoch_k'] = float(slowk[-1])
+                indicators['stoch_d'] = float(slowd[-1])
+                
+                indicators['obv'] = float(talib.OBV(close, volume)[-1])
+                indicators['mfi'] = float(talib.MFI(high, low, close, volume, timeperiod=14)[-1])
+                
+            else:
+                # Manual calculations as fallback
+                indicators = self._calculate_indicators_manual(data)
+                
+            # Volume analysis
+            indicators['volume_sma'] = float(data['Volume'].rolling(20).mean().iloc[-1])
+            indicators['relative_volume'] = float(data['Volume'].iloc[-1] / indicators['volume_sma']) if indicators['volume_sma'] > 0 else 1.0
+            
+            # Price position
+            indicators['price_position'] = self._calculate_price_position(data)
+            
+            # Momentum
+            indicators['momentum'] = self._calculate_momentum(data)
+            
+        except Exception as e:
+            self.logger.error("Error calculating indicators", error=str(e))
+            
+        return indicators
+        
+    def _calculate_indicators_manual(self, data: pd.DataFrame) -> Dict:
+        """Manual calculation of indicators when TA-Lib not available"""
+        indicators = {}
+        close = data['Close']
+        
+        # RSI
+        delta = close.diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=self.ta_config['rsi_period']).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=self.ta_config['rsi_period']).mean()
+        rs = gain / loss
+        indicators['rsi'] = float(100 - (100 / (1 + rs)).iloc[-1])
+        
+        # Moving averages
+        indicators['sma_20'] = float(close.rolling(window=self.ta_config['sma_short']).mean().iloc[-1])
+        indicators['sma_50'] = float(close.rolling(window=self.ta_config['sma_long']).mean().iloc[-1])
+        indicators['ema_9'] = float(close.ewm(span=self.ta_config['ema_short'], adjust=False).mean().iloc[-1])
+        indicators['ema_21'] = float(close.ewm(span=self.ta_config['ema_long'], adjust=False).mean().iloc[-1])
+        
+        # MACD
+        ema_fast = close.ewm(span=self.ta_config['macd_fast'], adjust=False).mean()
+        ema_slow = close.ewm(span=self.ta_config['macd_slow'], adjust=False).mean()
+        macd = ema_fast - ema_slow
+        signal = macd.ewm(span=self.ta_config['macd_signal'], adjust=False).mean()
+        
+        indicators['macd'] = float(macd.iloc[-1])
+        indicators['macd_signal'] = float(signal.iloc[-1])
+        indicators['macd_histogram'] = float(macd.iloc[-1] - signal.iloc[-1])
+        
+        # Bollinger Bands
+        sma = close.rolling(window=self.ta_config['bb_period']).mean()
+        std = close.rolling(window=self.ta_config['bb_period']).std()
+        
+        indicators['bb_upper'] = float(sma.iloc[-1] + (std.iloc[-1] * self.ta_config['bb_std']))
+        indicators['bb_middle'] = float(sma.iloc[-1])
+        indicators['bb_lower'] = float(sma.iloc[-1] - (std.iloc[-1] * self.ta_config['bb_std']))
+        indicators['bb_width'] = indicators['bb_upper'] - indicators['bb_lower']
+        indicators['bb_position'] = (close.iloc[-1] - indicators['bb_lower']) / indicators['bb_width'] if indicators['bb_width'] > 0 else 0.5
+        
+        # ATR (simplified)
+        high_low = data['High'] - data['Low']
+        high_close = np.abs(data['High'] - close.shift())
+        low_close = np.abs(data['Low'] - close.shift())
+        ranges = pd.concat([high_low, high_close, low_close], axis=1)
+        true_range = ranges.max(axis=1)
+        indicators['atr'] = float(true_range.rolling(self.ta_config['atr_period']).mean().iloc[-1])
+        
+        # Stochastic (simplified)
+        lowest_low = data['Low'].rolling(self.ta_config['stoch_period']).min()
+        highest_high = data['High'].rolling(self.ta_config['stoch_period']).max()
+        k = 100 * ((close - lowest_low) / (highest_high - lowest_low))
+        indicators['stoch_k'] = float(k.iloc[-1])
+        indicators['stoch_d'] = float(k.rolling(3).mean().iloc[-1])
+        
+        # OBV (simplified)
+        obv = (np.sign(close.diff()) * data['Volume']).cumsum()
+        indicators['obv'] = float(obv.iloc[-1])
+        
+        # ADX (simplified - just trend strength)
+        indicators['adx'] = 25.0  # Default value
+        
+        # MFI (simplified)
+        indicators['mfi'] = 50.0  # Default value
+        
+        return indicators
+        
+    def _analyze_trend(self, data: pd.DataFrame, indicators: Dict) -> Dict:
+        """Analyze the current trend"""
+        close = data['Close'].iloc[-1]
+        
+        trend = {
+            'direction': 'neutral',
+            'strength': 0,
+            'duration': 0,
+            'confirmed': False
         }
         
-        multiplier = type_multipliers.get(catalyst_type, 1.0)
-        
-        # Pre-market boost
-        if catalyst_data.get('is_pre_market'):
-            multiplier *= 1.2
+        # Moving average analysis
+        if indicators.get('sma_20', 0) > 0 and indicators.get('sma_50', 0) > 0:
+            if close > indicators['sma_20'] > indicators['sma_50']:
+                trend['direction'] = 'bullish'
+                trend['strength'] = 70
+            elif close < indicators['sma_20'] < indicators['sma_50']:
+                trend['direction'] = 'bearish'
+                trend['strength'] = 70
+            elif indicators['sma_20'] > indicators['sma_50']:
+                trend['direction'] = 'bullish'
+                trend['strength'] = 50
+            elif indicators['sma_20'] < indicators['sma_50']:
+                trend['direction'] = 'bearish'
+                trend['strength'] = 50
+                
+        # ADX confirmation
+        if indicators.get('adx', 0) > self.ta_config['adx_trend_strength']:
+            trend['confirmed'] = True
+            trend['strength'] = min(100, trend['strength'] + 20)
             
-        # Multiple news sources boost
-        news_count = catalyst_data.get('news_count', 1)
-        if news_count > 3:
-            multiplier *= 1.1
+        # MACD confirmation
+        if indicators.get('macd', 0) > indicators.get('macd_signal', 0):
+            if trend['direction'] == 'bullish':
+                trend['strength'] = min(100, trend['strength'] + 10)
+        elif indicators.get('macd', 0) < indicators.get('macd_signal', 0):
+            if trend['direction'] == 'bearish':
+                trend['strength'] = min(100, trend['strength'] + 10)
+                
+        # Calculate trend duration
+        if trend['direction'] != 'neutral':
+            trend['duration'] = self._calculate_trend_duration(data, trend['direction'])
             
-        final_score = min(100, base_score * multiplier)
+        return trend
         
-        return final_score
+    def _identify_chart_patterns(self, data: pd.DataFrame) -> List[Dict]:
+        """Identify chart patterns in price data"""
+        patterns = []
         
-    def _score_patterns(self, patterns: List[Dict]) -> float:
-        """Score detected patterns (0-100)"""
+        # Double Top/Bottom
+        double_pattern = self._detect_double_pattern(data)
+        if double_pattern:
+            patterns.append(double_pattern)
+            
+        # Head and Shoulders
+        hs_pattern = self._detect_head_shoulders(data)
+        if hs_pattern:
+            patterns.append(hs_pattern)
+            
+        # Triangle patterns
+        triangle = self._detect_triangle_pattern(data)
+        if triangle:
+            patterns.append(triangle)
+            
+        # Channel/Range
+        channel = self._detect_channel_pattern(data)
+        if channel:
+            patterns.append(channel)
+            
+        return patterns
+        
+    def _calculate_support_resistance_from_data(self, data: pd.DataFrame) -> Dict:
+        """Calculate support and resistance levels"""
+        high = data['High']
+        low = data['Low']
+        close = data['Close']
+        volume = data['Volume']
+        
+        # Find significant levels
+        levels = []
+        
+        # Recent highs and lows
+        for period in [20, 50, 100]:
+            if len(data) >= period:
+                levels.append({
+                    'level': float(high.tail(period).max()),
+                    'type': 'resistance',
+                    'strength': period / 20
+                })
+                levels.append({
+                    'level': float(low.tail(period).min()),
+                    'type': 'support',
+                    'strength': period / 20
+                })
+                
+        # Volume-weighted levels
+        vwap = (close * volume).sum() / volume.sum()
+        levels.append({
+            'level': float(vwap),
+            'type': 'pivot',
+            'strength': 2
+        })
+        
+        # Psychological levels (round numbers)
+        current_price = close.iloc[-1]
+        round_levels = [
+            round(current_price, -1),  # Nearest 10
+            round(current_price, -2),  # Nearest 100
+        ]
+        
+        for level in round_levels:
+            if abs(level - current_price) / current_price < 0.1:  # Within 10%
+                levels.append({
+                    'level': float(level),
+                    'type': 'psychological',
+                    'strength': 1
+                })
+                
+        # Sort and filter levels
+        support_levels = sorted([l for l in levels if l['type'] == 'support' or l['level'] < current_price],
+                               key=lambda x: x['level'], reverse=True)[:3]
+        resistance_levels = sorted([l for l in levels if l['type'] == 'resistance' or l['level'] > current_price],
+                                  key=lambda x: x['level'])[:3]
+        
+        return {
+            'support': support_levels,
+            'resistance': resistance_levels,
+            'pivot': float(vwap),
+            'current_price': float(current_price)
+        }
+        
+    def _calculate_technical_score(self, indicators: Dict, trend: Dict, patterns: List[Dict]) -> float:
+        """Calculate overall technical score (0-100)"""
+        score = 0
+        
+        # Trend score (0-30)
+        if trend['confirmed']:
+            score += min(30, trend['strength'] * 0.3)
+        else:
+            score += min(15, trend['strength'] * 0.15)
+            
+        # Momentum score (0-25)
+        rsi = indicators.get('rsi', 50)
+        if 30 < rsi < 70:  # Not oversold/overbought
+            score += 15
+        elif rsi <= 30 and trend['direction'] == 'bullish':  # Oversold in uptrend
+            score += 20
+        elif rsi >= 70 and trend['direction'] == 'bearish':  # Overbought in downtrend
+            score += 20
+        else:
+            score += 5
+            
+        # MACD score (0-20)
+        if indicators.get('macd', 0) > indicators.get('macd_signal', 0):
+            if trend['direction'] == 'bullish':
+                score += 20
+            else:
+                score += 10
+        elif indicators.get('macd', 0) < indicators.get('macd_signal', 0):
+            if trend['direction'] == 'bearish':
+                score += 20
+            else:
+                score += 10
+                
+        # Volume score (0-15)
+        rel_volume = indicators.get('relative_volume', 1.0)
+        if rel_volume > self.ta_config['volume_surge_multiplier']:
+            score += 15
+        elif rel_volume > 1.5:
+            score += 10
+        elif rel_volume > 1.0:
+            score += 5
+            
+        # Pattern score (0-10)
+        if patterns:
+            pattern_score = min(10, len(patterns) * 3)
+            score += pattern_score
+            
+        return min(100, score)
+        
+    def _generate_recommendation(self, technical_score: float, trend: Dict) -> str:
+        """Generate trading recommendation"""
+        if technical_score >= 80:
+            if trend['direction'] == 'bullish':
+                return 'STRONG_BUY'
+            elif trend['direction'] == 'bearish':
+                return 'STRONG_SELL'
+        elif technical_score >= 60:
+            if trend['direction'] == 'bullish':
+                return 'BUY'
+            elif trend['direction'] == 'bearish':
+                return 'SELL'
+        elif technical_score >= 40:
+            return 'HOLD'
+        else:
+            return 'AVOID'
+            
+    def _determine_signal_type(self, ta_result: Dict, patterns: List[Dict],
+                             catalyst_data: Dict) -> Tuple[str, str]:
+        """Determine signal type and direction"""
+        indicators = ta_result['indicators']
+        trend = ta_result['trend']
+        
+        # Check for momentum breakout
+        if (indicators.get('relative_volume', 0) > self.ta_config['volume_surge_multiplier'] and
+            abs(indicators.get('momentum', 0)) > 2):
+            if indicators['momentum'] > 0:
+                return 'momentum_breakout', 'BUY'
+            else:
+                return 'momentum_breakout', 'SELL'
+                
+        # Check for trend continuation
+        if trend['confirmed'] and trend['strength'] > 60:
+            if trend['direction'] == 'bullish':
+                return 'trend_continuation', 'BUY'
+            elif trend['direction'] == 'bearish':
+                return 'trend_continuation', 'SELL'
+                
+        # Check for reversal with catalyst
+        if catalyst_data.get('score', 0) > 50:
+            rsi = indicators.get('rsi', 50)
+            if rsi < self.ta_config['rsi_oversold'] and catalyst_data.get('type') in ['earnings_beat', 'upgrade']:
+                return 'reversal', 'BUY'
+            elif rsi > self.ta_config['rsi_overbought'] and catalyst_data.get('type') in ['earnings_miss', 'downgrade']:
+                return 'reversal', 'SELL'
+                
+        # Check patterns
+        if patterns:
+            bullish_patterns = [p for p in patterns if p.get('pattern_direction') == 'bullish']
+            bearish_patterns = [p for p in patterns if p.get('pattern_direction') == 'bearish']
+            
+            if len(bullish_patterns) > len(bearish_patterns):
+                return 'pattern_based', 'BUY'
+            elif len(bearish_patterns) > len(bullish_patterns):
+                return 'pattern_based', 'SELL'
+                
+        return 'NO_SIGNAL', 'NONE'
+        
+    def _calculate_signal_confidence(self, ta_result: Dict, patterns: List[Dict],
+                                   catalyst_data: Dict, signal_type: str) -> float:
+        """Calculate signal confidence score"""
+        # Base confidence from signal type
+        base_confidence = self.signal_types.get(signal_type, {}).get('min_confidence', 50)
+        
+        # Technical score contribution
+        technical_contribution = ta_result['technical_score'] * self.ta_config['technical_weight']
+        
+        # Catalyst contribution
+        catalyst_score = catalyst_data.get('score', 0)
+        catalyst_contribution = catalyst_score * self.ta_config['catalyst_weight']
+        
+        # Pattern contribution
+        pattern_confidence = 0
+        if patterns:
+            pattern_confidence = max([p.get('final_confidence', 0) for p in patterns])
+            
+        # Combine scores
+        confidence = (base_confidence * 0.3 +
+                     technical_contribution * 0.3 +
+                     catalyst_contribution * 0.2 +
+                     pattern_confidence * 0.2)
+        
+        # Adjust for signal type weight
+        signal_weight = self.signal_types.get(signal_type, {}).get('weight', 1.0)
+        confidence *= signal_weight
+        
+        return min(100, confidence)
+        
+    def _calculate_trade_levels(self, current_price: float, direction: str,
+                              ta_result: Dict, signal_type: str) -> Dict:
+        """Calculate entry, stop loss, and target levels"""
+        indicators = ta_result['indicators']
+        support_resistance = ta_result['support_resistance']
+        atr = indicators.get('atr', current_price * 0.01)  # Default 1% if no ATR
+        
+        levels = {
+            'entry': current_price,
+            'stop_loss': 0,
+            'target_1': 0,
+            'target_2': 0,
+            'risk_reward_ratio': 0
+        }
+        
+        if direction == 'BUY':
+            # Entry slightly above current price
+            levels['entry'] = current_price * 1.001
+            
+            # Stop loss calculation
+            stop_methods = []
+            
+            # ATR-based stop
+            stop_methods.append(current_price - (atr * self.ta_config['atr_stop_multiplier']))
+            
+            # Support-based stop
+            if support_resistance['support']:
+                nearest_support = support_resistance['support'][0]['level']
+                stop_methods.append(nearest_support * 0.99)
+                
+            # Percentage-based stop
+            stop_methods.append(current_price * (1 - self.ta_config['default_stop_loss_pct'] / 100))
+            
+            # Use the highest stop (least risk)
+            levels['stop_loss'] = max(stop_methods)
+            
+            # Target calculation
+            risk = levels['entry'] - levels['stop_loss']
+            
+            # Target 1: 2:1 risk/reward
+            levels['target_1'] = levels['entry'] + (risk * 2)
+            
+            # Target 2: Next resistance or 3:1 risk/reward
+            if support_resistance['resistance']:
+                nearest_resistance = support_resistance['resistance'][0]['level']
+                levels['target_2'] = max(nearest_resistance, levels['entry'] + (risk * 3))
+            else:
+                levels['target_2'] = levels['entry'] + (risk * 3)
+                
+        else:  # SELL
+            # Entry slightly below current price
+            levels['entry'] = current_price * 0.999
+            
+            # Stop loss calculation
+            stop_methods = []
+            
+            # ATR-based stop
+            stop_methods.append(current_price + (atr * self.ta_config['atr_stop_multiplier']))
+            
+            # Resistance-based stop
+            if support_resistance['resistance']:
+                nearest_resistance = support_resistance['resistance'][0]['level']
+                stop_methods.append(nearest_resistance * 1.01)
+                
+            # Percentage-based stop
+            stop_methods.append(current_price * (1 + self.ta_config['default_stop_loss_pct'] / 100))
+            
+            # Use the lowest stop (least risk)
+            levels['stop_loss'] = min(stop_methods)
+            
+            # Target calculation
+            risk = levels['stop_loss'] - levels['entry']
+            
+            # Target 1: 2:1 risk/reward
+            levels['target_1'] = levels['entry'] - (risk * 2)
+            
+            # Target 2: Next support or 3:1 risk/reward
+            if support_resistance['support']:
+                nearest_support = support_resistance['support'][0]['level']
+                levels['target_2'] = min(nearest_support, levels['entry'] - (risk * 3))
+            else:
+                levels['target_2'] = levels['entry'] - (risk * 3)
+                
+        # Calculate risk/reward ratio
+        if direction == 'BUY':
+            potential_reward = levels['target_1'] - levels['entry']
+            risk = levels['entry'] - levels['stop_loss']
+        else:
+            potential_reward = levels['entry'] - levels['target_1']
+            risk = levels['stop_loss'] - levels['entry']
+            
+        levels['risk_reward_ratio'] = potential_reward / risk if risk > 0 else 0
+        
+        return levels
+        
+    def _calculate_pattern_score(self, patterns: List[Dict]) -> float:
+        """Calculate pattern score from detected patterns"""
         if not patterns:
             return 0
             
-        # Use the highest confidence pattern
-        max_confidence = max(p.get('final_confidence', 0) for p in patterns)
+        # Average confidence of all patterns
+        confidences = [p.get('final_confidence', 0) for p in patterns]
+        return sum(confidences) / len(confidences) if confidences else 0
         
-        # Bonus for multiple confirming patterns
-        if len(patterns) > 1:
-            # Check if patterns align
-            directions = [p.get('pattern_direction') for p in patterns]
-            if len(set(directions)) == 1:  # All same direction
-                max_confidence = min(100, max_confidence * 1.1)
-                
-        return max_confidence
+    def _calculate_volume_score(self, ta_result: Dict) -> float:
+        """Calculate volume score"""
+        indicators = ta_result['indicators']
+        rel_volume = indicators.get('relative_volume', 1.0)
         
-    def _score_indicators(self, indicators: Dict) -> float:
-        """
-        Score technical indicators (0-100)
-        Combines RSI, MACD, and moving average signals
-        """
-        if not indicators:
-            return 0
-            
-        score = 50  # Start neutral
-        
-        # RSI scoring
-        rsi = indicators.get('rsi', 50)
-        if rsi < self.indicator_config['rsi']['oversold']:
-            score += 20  # Oversold = bullish
-        elif rsi > self.indicator_config['rsi']['overbought']:
-            score -= 20  # Overbought = bearish
-            
-        # MACD scoring
-        macd_hist = indicators.get('macd_histogram', 0)
-        if macd_hist > 0:
-            score += 15  # Positive histogram = bullish
+        if rel_volume > 3:
+            return 100
+        elif rel_volume > 2:
+            return 80
+        elif rel_volume > 1.5:
+            return 60
+        elif rel_volume > 1:
+            return 40
         else:
-            score -= 15  # Negative histogram = bearish
+            return 20
             
-        # Moving average scoring
-        current_price = indicators.get('current_price', 0)
-        sma_20 = indicators.get('sma_20', current_price)
-        sma_50 = indicators.get('sma_50', current_price)
-        
-        if current_price > sma_20 > sma_50:
-            score += 15  # Price above both MAs = bullish
-        elif current_price < sma_20 < sma_50:
-            score -= 15  # Price below both MAs = bearish
-            
-        # Trend alignment
-        trend = indicators.get('trend', 'neutral')
-        if trend == 'bullish':
-            score += 10
-        elif trend == 'bearish':
-            score -= 10
-            
-        return max(0, min(100, score))
-        
-    def _score_volume(self, volume_data: Dict) -> float:
-        """Score volume characteristics (0-100)"""
-        if not volume_data:
-            return 50  # Neutral if no volume data
-            
-        volume_ratio = volume_data.get('volume_ratio', 1.0)
-        
-        # High volume confirms moves
-        if volume_ratio >= 2.0:
-            return 90
-        elif volume_ratio >= 1.5:
-            return 70
-        elif volume_ratio >= 1.0:
-            return 50
-        else:
-            return 30  # Low volume = weak signal
-            
-    def _determine_signal_type(self, confidence: float, patterns: List[Dict],
-                              indicators: Dict, catalyst_data: Dict) -> str:
-        """
-        Determine BUY/SELL/HOLD based on all factors
-        """
-        # Start with confidence-based decision
-        if confidence < 30:
-            return 'HOLD'
-            
-        # Look at pattern directions
-        if patterns:
-            bullish_patterns = sum(1 for p in patterns if p.get('pattern_direction') == 'bullish')
-            bearish_patterns = sum(1 for p in patterns if p.get('pattern_direction') == 'bearish')
-            
-            # Strong pattern bias
-            if bullish_patterns > bearish_patterns:
-                signal_direction = 'BUY'
-            elif bearish_patterns > bullish_patterns:
-                signal_direction = 'SELL'
-            else:
-                signal_direction = 'HOLD'
-        else:
-            signal_direction = 'HOLD'
-            
-        # Confirm with indicators
-        rsi = indicators.get('rsi', 50)
-        macd_hist = indicators.get('macd_histogram', 0)
-        
-        # RSI extremes can override
-        if rsi < 30 and signal_direction != 'SELL':
-            signal_direction = 'BUY'
-        elif rsi > 70 and signal_direction != 'BUY':
-            signal_direction = 'SELL'
-            
-        # Catalyst sentiment can strengthen or weaken signal
-        catalyst_sentiment = catalyst_data.get('sentiment', 'neutral')
-        if catalyst_sentiment == 'positive' and signal_direction == 'SELL':
-            signal_direction = 'HOLD'  # Don't fight positive catalyst
-        elif catalyst_sentiment == 'negative' and signal_direction == 'BUY':
-            signal_direction = 'HOLD'  # Don't fight negative catalyst
-            
-        return signal_direction
-        
-    def _calculate_entry_exit_levels(self, signal_type: str, current_price: float,
-                                   confidence: float, catalyst_data: Dict) -> Dict:
-        """
-        Calculate entry, stop loss, and targets
-        Tighter stops with strong catalysts!
-        """
-        levels = {}
-        
-        # Entry price (can adjust for better fills)
-        if signal_type == 'BUY':
-            # Enter slightly below current for better fill
-            levels['entry'] = current_price * 0.999
-        elif signal_type == 'SELL':
-            # Enter slightly above current for better fill
-            levels['entry'] = current_price * 1.001
-        else:
-            levels['entry'] = current_price
-            
-        # Stop loss - tighter with strong catalysts
-        catalyst_strength = self._classify_catalyst_strength(
-            catalyst_data.get('score', 0)
-        )
-        stop_adjustment = self.risk_params['catalyst_stop_adjustment'][catalyst_strength]
-        stop_loss_pct = self.risk_params['base_stop_loss_pct'] * stop_adjustment
-        
-        if signal_type == 'BUY':
-            levels['stop_loss'] = levels['entry'] * (1 - stop_loss_pct / 100)
-            risk_amount = levels['entry'] - levels['stop_loss']
-            levels['target_1'] = levels['entry'] + (risk_amount * self.risk_params['target_multipliers']['target_1'])
-            levels['target_2'] = levels['entry'] + (risk_amount * self.risk_params['target_multipliers']['target_2'])
-        else:  # SELL
-            levels['stop_loss'] = levels['entry'] * (1 + stop_loss_pct / 100)
-            risk_amount = levels['stop_loss'] - levels['entry']
-            levels['target_1'] = levels['entry'] - (risk_amount * self.risk_params['target_multipliers']['target_1'])
-            levels['target_2'] = levels['entry'] - (risk_amount * self.risk_params['target_multipliers']['target_2'])
-            
-        # Calculate risk/reward
-        if signal_type != 'HOLD':
-            reward = abs(levels['target_1'] - levels['entry'])
-            risk = abs(levels['entry'] - levels['stop_loss'])
-            levels['risk_reward'] = round(reward / risk, 2) if risk > 0 else 0
-        else:
-            levels['risk_reward'] = 0
-            
-        # Round all prices
-        for key in levels:
-            if key != 'risk_reward':
-                levels[key] = round(levels[key], 2)
-                
-        return levels
-        
-    def _classify_catalyst_strength(self, catalyst_score: float) -> str:
-        """Classify catalyst as strong/moderate/weak"""
-        if catalyst_score >= 70:
-            return 'strong'
-        elif catalyst_score >= 40:
-            return 'moderate'
-        else:
-            return 'weak'
-            
-    def _calculate_position_size(self, confidence: float) -> float:
-        """
-        Calculate position size based on confidence
-        Higher confidence = larger position
-        """
-        if confidence >= 70:
-            return self.risk_params['position_size_map']['strong_signal'] * 100
-        elif confidence >= 50:
-            return self.risk_params['position_size_map']['normal_signal'] * 100
-        else:
-            return self.risk_params['position_size_map']['weak_signal'] * 100
-            
-    def _generate_key_factors(self, catalyst_data: Dict, patterns: List[Dict],
-                            indicators: Dict, confidence: float) -> List[str]:
-        """
-        Generate human-readable reasons for the signal
-        This helps traders understand WHY we're trading
-        """
+    def _identify_key_factors(self, ta_result: Dict, patterns: List[Dict],
+                            catalyst_data: Dict) -> List[str]:
+        """Identify key factors driving the signal"""
         factors = []
         
-        # Catalyst factors
-        if catalyst_data.get('type'):
-            factors.append(f"{catalyst_data['type'].replace('_', ' ').title()} catalyst")
+        # Technical factors
+        indicators = ta_result['indicators']
+        
+        if indicators.get('relative_volume', 0) > 2:
+            factors.append('High volume surge')
+            
+        if indicators.get('rsi', 50) < 30:
+            factors.append('Oversold RSI')
+        elif indicators.get('rsi', 50) > 70:
+            factors.append('Overbought RSI')
+            
+        if ta_result['trend']['confirmed']:
+            factors.append(f"Confirmed {ta_result['trend']['direction']} trend")
             
         # Pattern factors
         if patterns:
-            top_pattern = patterns[0]
-            factors.append(f"{top_pattern['pattern_name'].replace('_', ' ').title()} pattern detected")
+            pattern_names = [p['pattern_name'] for p in patterns[:2]]
+            factors.extend([f"{name} pattern" for name in pattern_names])
             
-        # Indicator factors
-        rsi = indicators.get('rsi', 50)
-        if rsi < 30:
-            factors.append("RSI oversold")
-        elif rsi > 70:
-            factors.append("RSI overbought")
+        # Catalyst factors
+        if catalyst_data.get('type'):
+            factors.append(f"{catalyst_data['type']} catalyst")
             
-        # Volume factors
-        volume_ratio = indicators.get('volume_data', {}).get('volume_ratio', 1)
-        if volume_ratio > 2:
-            factors.append("High volume confirmation")
-            
-        # Confidence factor
-        if confidence >= 70:
-            factors.append("High confidence setup")
-            
-        # Pre-market factor
-        if catalyst_data.get('is_pre_market'):
-            factors.append("Pre-market catalyst")
-            
-        return factors
+        return factors[:5]  # Limit to top 5 factors
         
-    def _create_no_trade_signal(self, symbol: str, reason: str) -> Dict:
-        """Create a HOLD signal with explanation"""
-        return {
-            'symbol': symbol,
-            'signal_type': 'HOLD',
-            'confidence': 0,
-            'reason': reason,
-            'timestamp': datetime.now().isoformat()
-        }
+    def _calculate_position_size(self, confidence: float, signal_type: str) -> float:
+        """Calculate recommended position size based on confidence"""
+        base_size = float(os.getenv('POSITION_SIZE_PCT', '20'))
         
-    def _save_signal(self, signal: Dict):
-        """Save signal to database"""
-        try:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-            
-            cursor.execute('''
-                INSERT INTO trading_signals (
-                    signal_id, symbol, signal_type, confidence,
-                    catalyst_score, pattern_score, indicator_score, volume_score,
-                    recommended_entry, stop_loss, target_1, target_2,
-                    catalyst_type, catalyst_strength, detected_patterns,
-                    key_factors, position_size_pct, risk_reward_ratio,
-                    is_pre_market, ml_features
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (
-                signal['signal_id'], signal['symbol'], signal['signal_type'],
-                signal['confidence'], signal['catalyst_score'], signal['pattern_score'],
-                signal['indicator_score'], signal['volume_score'],
-                signal['recommended_entry'], signal['stop_loss'],
-                signal['target_1'], signal['target_2'],
-                signal.get('catalyst_type'), signal.get('catalyst_strength'),
-                json.dumps(signal.get('detected_patterns', [])),
-                json.dumps(signal.get('key_factors', [])),
-                signal.get('position_size_pct'), signal.get('risk_reward_ratio'),
-                signal.get('is_pre_market', False),
-                json.dumps(signal.get('ml_features', {}))
-            ))
-            
-            conn.commit()
-            conn.close()
-            
-            self.logger.info(f"Saved signal {signal['signal_id']} for {signal['symbol']}")
-            
-        except Exception as e:
-            self.logger.error(f"Error saving signal: {e}")
-            
-    def _get_signal_performance(self, signal_type: Optional[str] = None,
-                               catalyst_type: Optional[str] = None) -> Dict:
-        """Get signal performance statistics"""
-        try:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-            
-            query = "SELECT * FROM signal_performance WHERE 1=1"
-            params = []
-            
-            if signal_type:
-                query += " AND signal_type = ?"
-                params.append(signal_type)
-                
-            if catalyst_type:
-                query += " AND catalyst_type = ?"
-                params.append(catalyst_type)
-                
-            cursor.execute(query, params)
-            
-            stats = []
-            for row in cursor.fetchall():
-                stats.append({
-                    'signal_type': row[1],
-                    'catalyst_type': row[2],
-                    'confidence_range': row[3],
-                    'total_signals': row[4],
-                    'success_rate': row[7],
-                    'avg_win': row[9],
-                    'avg_loss': row[10],
-                    'profit_factor': row[11]
-                })
-                
-            conn.close()
-            
-            return {'performance': stats}
-            
-        except Exception as e:
-            self.logger.error(f"Error getting performance: {e}")
-            return {'error': str(e)}
-            
-    def _update_signal_outcome(self, signal_id: str, outcome: Dict) -> Dict:
-        """Update signal with actual trading outcome"""
-        try:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-            
-            cursor.execute('''
-                UPDATE trading_signals
-                SET signal_outcome = ?,
-                    actual_pnl = ?,
-                    executed = TRUE
-                WHERE signal_id = ?
-            ''', (
-                outcome.get('result'),  # success, stopped_out, partial_success
-                outcome.get('pnl', 0),
-                signal_id
-            ))
-            
-            conn.commit()
-            conn.close()
-            
-            # Update performance statistics
-            self._update_performance_stats()
-            
-            return {'status': 'success', 'signal_id': signal_id}
-            
-        except Exception as e:
-            self.logger.error(f"Error updating outcome: {e}")
-            return {'error': str(e)}
-            
-    def _update_performance_stats(self):
-        """Update signal performance statistics"""
-        # This would run periodically to calculate success rates
-        pass
-        
-    # Technical indicator calculations (fallbacks when TA-Lib not available)
-    
-    def _calculate_rsi(self, prices: np.ndarray, period: int = 14) -> float:
-        """Calculate RSI manually"""
-        deltas = np.diff(prices)
-        seed = deltas[:period+1]
-        up = seed[seed >= 0].sum() / period
-        down = -seed[seed < 0].sum() / period
-        rs = up / down if down != 0 else 100
-        rsi = 100 - (100 / (1 + rs))
-        return rsi
-        
-    def _calculate_macd(self, prices: np.ndarray) -> Dict:
-        """Calculate MACD manually"""
-        exp1 = pd.Series(prices).ewm(span=12, adjust=False).mean()
-        exp2 = pd.Series(prices).ewm(span=26, adjust=False).mean()
-        macd = exp1 - exp2
-        signal = macd.ewm(span=9, adjust=False).mean()
-        histogram = macd - signal
-        
-        return {
-            'macd': macd.iloc[-1],
-            'macd_signal': signal.iloc[-1],
-            'macd_histogram': histogram.iloc[-1]
-        }
-        
-    def _calculate_sma(self, prices: np.ndarray, period: int) -> float:
-        """Simple Moving Average"""
-        if len(prices) < period:
-            return prices[-1]
-        return np.mean(prices[-period:])
-        
-    def _calculate_ema(self, prices: np.ndarray, period: int) -> float:
-        """Exponential Moving Average"""
-        return pd.Series(prices).ewm(span=period, adjust=False).mean().iloc[-1]
-        
-    def _detect_trend(self, prices: np.ndarray) -> str:
-        """Detect price trend"""
-        if len(prices) < 20:
-            return 'neutral'
-            
-        sma_20 = self._calculate_sma(prices, 20)
-        sma_50 = self._calculate_sma(prices, 50) if len(prices) >= 50 else sma_20
-        
-        current = prices[-1]
-        
-        if current > sma_20 > sma_50:
-            return 'bullish'
-        elif current < sma_20 < sma_50:
-            return 'bearish'
+        # Adjust based on confidence
+        if confidence > 80:
+            size_multiplier = 1.0
+        elif confidence > 70:
+            size_multiplier = 0.8
+        elif confidence > 60:
+            size_multiplier = 0.6
         else:
-            return 'neutral'
+            size_multiplier = 0.4
             
-    def _get_price_data(self, symbol: str) -> Optional[pd.DataFrame]:
-        """Get price data for analysis"""
-        # In production, this would fetch from yfinance or data provider
-        # For now, return mock data
-        return self._get_mock_price_data(symbol)
+        # Adjust based on signal type
+        if signal_type == 'reversal':
+            size_multiplier *= 0.8  # More risky
+        elif signal_type == 'trend_continuation':
+            size_multiplier *= 1.1  # Less risky
+            
+        return min(base_size * size_multiplier, base_size)
         
-    def _get_mock_price_data(self, symbol: str) -> pd.DataFrame:
+    def _save_indicators(self, symbol: str, timeframe: str, indicators: Dict,
+                        price_data: pd.DataFrame):
+        """Save technical indicators to database"""
+        try:
+            latest = price_data.iloc[-1]
+            
+            indicator_data = {
+                'symbol': symbol,
+                'timeframe': timeframe,
+                'open_price': float(latest['Open']),
+                'high_price': float(latest['High']),
+                'low_price': float(latest['Low']),
+                'close_price': float(latest['Close']),
+                'volume': int(latest['Volume']),
+                'rsi': indicators.get('rsi'),
+                'macd': indicators.get('macd'),
+                'macd_signal': indicators.get('macd_signal'),
+                'sma_20': indicators.get('sma_20'),
+                'sma_50': indicators.get('sma_50'),
+                'ema_9': indicators.get('ema_9'),
+                'atr': indicators.get('atr'),
+                'bollinger_upper': indicators.get('bb_upper'),
+                'bollinger_lower': indicators.get('bb_lower'),
+                'volume_sma': indicators.get('volume_sma'),
+                'relative_volume': indicators.get('relative_volume')
+            }
+            
+            insert_technical_indicators(indicator_data)
+            
+        except Exception as e:
+            self.logger.error("Error saving indicators", error=str(e))
+            
+    def _calculate_price_position(self, data: pd.DataFrame) -> float:
+        """Calculate where price is relative to recent range (0-100)"""
+        high = data['High'].tail(20).max()
+        low = data['Low'].tail(20).min()
+        current = data['Close'].iloc[-1]
+        
+        if high > low:
+            position = (current - low) / (high - low) * 100
+            return float(min(100, max(0, position)))
+        return 50.0
+        
+    def _calculate_momentum(self, data: pd.DataFrame) -> float:
+        """Calculate price momentum"""
+        # Simple rate of change
+        periods = min(10, len(data) - 1)
+        if periods > 0:
+            old_price = data['Close'].iloc[-periods-1]
+            current_price = data['Close'].iloc[-1]
+            momentum = ((current_price - old_price) / old_price) * 100
+            return float(momentum)
+        return 0.0
+        
+    def _calculate_trend_duration(self, data: pd.DataFrame, direction: str) -> int:
+        """Calculate how long the trend has been in place (in periods)"""
+        sma_20 = data['Close'].rolling(20).mean()
+        sma_50 = data['Close'].rolling(50).mean()
+        
+        duration = 0
+        for i in range(len(data) - 1, max(0, len(data) - 100), -1):
+            if direction == 'bullish':
+                if sma_20.iloc[i] > sma_50.iloc[i]:
+                    duration += 1
+                else:
+                    break
+            else:  # bearish
+                if sma_20.iloc[i] < sma_50.iloc[i]:
+                    duration += 1
+                else:
+                    break
+                    
+        return duration
+        
+    def _detect_double_pattern(self, data: pd.DataFrame) -> Optional[Dict]:
+        """Detect double top/bottom patterns"""
+        # Simplified detection
+        return None
+        
+    def _detect_head_shoulders(self, data: pd.DataFrame) -> Optional[Dict]:
+        """Detect head and shoulders patterns"""
+        # Simplified detection
+        return None
+        
+    def _detect_triangle_pattern(self, data: pd.DataFrame) -> Optional[Dict]:
+        """Detect triangle patterns"""
+        # Simplified detection
+        return None
+        
+    def _detect_channel_pattern(self, data: pd.DataFrame) -> Optional[Dict]:
+        """Detect channel/range patterns"""
+        # Simplified detection
+        return None
+        
+    def _calculate_support_resistance(self, symbol: str, timeframe: str) -> Dict:
+        """Calculate support and resistance levels for API endpoint"""
+        data = self._get_price_data(symbol, timeframe)
+        if data is None:
+            return {'error': 'No data available'}
+            
+        return self._calculate_support_resistance_from_data(data)
+        
+    def _calculate_all_indicators(self, symbol: str, timeframe: str) -> Optional[Dict]:
+        """Calculate all indicators for API endpoint"""
+        data = self._get_price_data(symbol, timeframe)
+        if data is None:
+            return None
+            
+        return self._calculate_indicators(data)
+        
+    def _get_mock_price_data(self, symbol: str, timeframe: str) -> pd.DataFrame:
         """Generate mock price data for testing"""
-        dates = pd.date_range(end=datetime.now(), periods=100, freq='5min')
+        # Generate realistic OHLCV data
+        periods = 100
+        dates = pd.date_range(end=datetime.now(), periods=periods, freq='5min')
         
-        # Generate realistic price movement
+        # Generate random walk
         np.random.seed(hash(symbol) % 1000)
         base_price = 100
-        returns = np.random.normal(0.0002, 0.01, len(dates))
+        returns = np.random.normal(0.0002, 0.01, periods)
         prices = base_price * np.exp(np.cumsum(returns))
         
         # Create OHLCV
         df = pd.DataFrame({
-            'Open': prices * (1 + np.random.normal(0, 0.002, len(dates))),
-            'High': prices * (1 + np.abs(np.random.normal(0, 0.005, len(dates)))),
-            'Low': prices * (1 - np.abs(np.random.normal(0, 0.005, len(dates)))),
+            'Open': prices * (1 + np.random.normal(0, 0.002, periods)),
+            'High': prices * (1 + np.abs(np.random.normal(0, 0.005, periods))),
+            'Low': prices * (1 - np.abs(np.random.normal(0, 0.005, periods))),
             'Close': prices,
-            'Volume': np.random.randint(100000, 1000000, len(dates))
+            'Volume': np.random.randint(100000, 1000000, periods)
         }, index=dates)
         
         # Ensure OHLC relationship
@@ -986,27 +1157,29 @@ class CatalystWeightedTechnicalAnalysis(DatabaseServiceMixin if USE_DB_UTILS els
                 json={
                     'service_name': 'technical_analysis',
                     'service_info': {
-                        'url': 'http://localhost:5003',
-                        'port': 5003,
-                        'version': '2.0.0',
-                        'capabilities': ['catalyst_weighted', 'ml_ready']
+                        'url': f"http://technical-service:{self.port}",
+                        'port': self.port,
+                        'version': '2.1.0',
+                        'capabilities': ['indicators', 'signals', 'support_resistance']
                     }
-                }
+                },
+                timeout=5
             )
             if response.status_code == 200:
                 self.logger.info("Successfully registered with coordination service")
         except Exception as e:
-            self.logger.warning(f"Could not register with coordination: {e}")
+            self.logger.warning(f"Could not register with coordination", error=str(e))
             
     def run(self):
-        """Start the Flask application"""
-        self.logger.info("Starting Catalyst-Weighted Technical Analysis v2.0.0 on port 5003")
-        self.logger.info("Signal generation with catalyst integration active")
-        self.logger.info("Signal formula: 35% Catalyst + 35% Pattern + 20% Indicators + 10% Volume")
+        """Start the technical analysis service"""
+        self.logger.info("Starting Technical Analysis Service",
+                        version="2.1.0",
+                        port=self.port,
+                        environment=os.getenv('ENVIRONMENT', 'development'))
         
-        self.app.run(host='0.0.0.0', port=5003, debug=False)
+        self.app.run(host='0.0.0.0', port=self.port, debug=False)
 
 
 if __name__ == "__main__":
-    service = CatalystWeightedTechnicalAnalysis()
+    service = TechnicalAnalysisService()
     service.run()

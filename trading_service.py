@@ -1,388 +1,290 @@
 #!/usr/bin/env python3
 """
-Name of Service: TRADING SYSTEM PAPER TRADING - OUTCOME TRACKING VERSION
-Version: 2.0.0
-Last Updated: 2025-06-28
-Purpose: Execute trades and track outcomes for ML training
+Name of Application: Catalyst Trading System
+Name of file: trading_service.py
+Version: 2.1.0
+Last Updated: 2025-07-01
+Purpose: Paper trading execution service with position management
 
 REVISION HISTORY:
-v2.0.0 (2025-06-28) - Catalyst-aware execution with outcome tracking
-- Executes signals from Technical Analysis service
-- Manages positions with dynamic stops based on catalyst strength
-- Tracks trade outcomes for pattern learning
-- Pre-market and regular hours handling
-- Records which news led to profits/losses
+v2.1.0 (2025-07-01) - Production-ready implementation
+- PostgreSQL integration for trade records
+- Alpaca API integration for paper trading
+- Position management with risk controls
+- Real-time order tracking
+- Portfolio analytics
+- Stop loss and take profit automation
 
-This service is the EXECUTION ENGINE. It:
-1. Receives trading signals
-2. Places orders via Alpaca API
-3. Manages positions (stops, targets)
-4. Tracks P&L in real-time
-5. Updates news accuracy based on outcomes
-6. Feeds ML training data
+Description of Service:
+This service handles all trading operations including order execution,
+position management, and portfolio tracking. It integrates with Alpaca's
+paper trading API for safe testing without real money.
 
 KEY FEATURES:
-- Catalyst-aware position sizing
-- Dynamic stop management
-- Outcome tracking for ML
-- Pre-market execution capability
-- Risk limits enforcement
-- Slippage simulation
-
-RISK MANAGEMENT:
-- Max 5 positions at once
-- Max 20% capital per position
-- Daily loss limit: 5% of capital
-- Tighter stops with strong catalysts
+- Paper trading via Alpaca API
+- Position sizing based on signal confidence
+- Automatic stop loss and take profit orders
+- Real-time position tracking
+- Portfolio performance metrics
+- Risk management controls
+- Trade history and analytics
 """
 
 import os
 import json
 import time
-import sqlite3
 import logging
 import requests
-import threading
-from datetime import datetime, timedelta
-from flask import Flask, request, jsonify
-from typing import Dict, List, Optional, Tuple
 import pandas as pd
+import numpy as np
+from datetime import datetime, timedelta
 from decimal import Decimal
-from queue import Queue
+from flask import Flask, request, jsonify
+from typing import Dict, List, Optional, Tuple, Any
+from concurrent.futures import ThreadPoolExecutor
+from structlog import get_logger
+import redis
+import alpaca_trade_api as tradeapi
 
-# Import Alpaca trading client
-try:
-    from alpaca_trade_api import REST
-    ALPACA_AVAILABLE = True
-except ImportError:
-    ALPACA_AVAILABLE = False
-    print("Warning: alpaca-trade-api not installed, using mock trading")
-
-# Import database utilities if available
-try:
-    from database_utils_old import DatabaseServiceMixin
-    USE_DB_UTILS = True
-except ImportError:
-    USE_DB_UTILS = False
-    print("Warning: database_utils not found, using direct SQLite connections")
+# Import database utilities
+from database_utils import (
+    get_db_connection,
+    insert_trade_record,
+    update_trade_exit,
+    get_open_positions,
+    get_pending_signals,
+    get_redis,
+    health_check
+)
 
 
-class CatalystAwarePaperTrading(DatabaseServiceMixin if USE_DB_UTILS else object):
+class TradingService:
     """
-    Paper trading with catalyst awareness and outcome tracking
+    Paper trading service for order execution and position management
     """
     
-    def __init__(self, db_path='/tmp//tmp/trading_system.db'):
-        if USE_DB_UTILS:
-            super().__init__(db_path)
-        else:
-            self.db_path = db_path
-            
+    def __init__(self):
+        # Initialize environment
+        self.setup_environment()
+        
         self.app = Flask(__name__)
         self.setup_logging()
-        self.setup_routes()
         
-        # Service URLs
-        self.coordination_url = "http://localhost:5000"
-        self.news_service_url = "http://localhost:5008"
+        # Initialize Redis client
+        self.redis_client = get_redis()
         
-        # Alpaca configuration
-        self.alpaca_config = {
-            'api_key': os.getenv('ALPACA_API_KEY', ''),
-            'secret_key': os.getenv('ALPACA_SECRET_KEY', ''),
-            'base_url': os.getenv('ALPACA_BASE_URL', 'https://paper-api.alpaca.markets'),
-            'api_version': 'v2'
-        }
+        # Initialize Alpaca API
+        self.alpaca = self._init_alpaca()
         
-        # Initialize Alpaca client
-        self.alpaca_client = self._init_alpaca_client()
+        # Service URLs from environment
+        self.coordination_url = os.getenv('COORDINATION_URL', 'http://coordination-service:5000')
+        self.technical_url = os.getenv('TECHNICAL_SERVICE_URL', 'http://technical-service:5003')
         
-        # Risk management parameters
-        self.risk_params = {
-            'max_positions': 5,
-            'max_position_size_pct': 20.0,  # 20% of capital
-            'max_daily_loss_pct': 5.0,      # 5% daily loss limit
-            'pre_market_position_pct': 10.0, # Smaller pre-market positions
-            'min_price': 1.0,               # No penny stocks
-            'max_price': 10000.0            # Reasonable upper limit
+        # Trading configuration
+        self.trading_config = {
+            # Position sizing
+            'max_positions': int(os.getenv('MAX_POSITIONS', '5')),
+            'max_position_size_pct': float(os.getenv('MAX_POSITION_SIZE_PCT', '20')),
+            'min_position_size_pct': float(os.getenv('MIN_POSITION_SIZE_PCT', '5')),
+            'default_position_size_pct': float(os.getenv('DEFAULT_POSITION_SIZE_PCT', '10')),
+            
+            # Risk management
+            'max_portfolio_risk_pct': float(os.getenv('MAX_PORTFOLIO_RISK_PCT', '10')),
+            'default_stop_loss_pct': float(os.getenv('DEFAULT_STOP_LOSS_PCT', '2')),
+            'default_take_profit_pct': float(os.getenv('DEFAULT_TAKE_PROFIT_PCT', '4')),
+            'trailing_stop_pct': float(os.getenv('TRAILING_STOP_PCT', '1.5')),
+            
+            # Order management
+            'order_timeout_seconds': int(os.getenv('ORDER_TIMEOUT_SECONDS', '60')),
+            'max_slippage_pct': float(os.getenv('MAX_SLIPPAGE_PCT', '0.5')),
+            'use_limit_orders': os.getenv('USE_LIMIT_ORDERS', 'true').lower() == 'true',
+            'limit_order_offset_pct': float(os.getenv('LIMIT_ORDER_OFFSET_PCT', '0.1')),
+            
+            # Trading hours
+            'allow_premarket': os.getenv('ALLOW_PREMARKET', 'true').lower() == 'true',
+            'allow_afterhours': os.getenv('ALLOW_AFTERHOURS', 'false').lower() == 'true',
+            
+            # Performance tracking
+            'commission_per_share': float(os.getenv('COMMISSION_PER_SHARE', '0.0')),
+            'min_profit_pct': float(os.getenv('MIN_PROFIT_PCT', '0.5')),
+            
+            # Cache settings
+            'cache_ttl': int(os.getenv('TRADING_CACHE_TTL', '60'))  # 1 minute
         }
         
         # Position tracking
-        self.active_positions = {}  # symbol -> position data
-        self.daily_pnl = 0.0
-        self.trade_queue = Queue()
+        self.positions = {}
+        self.pending_orders = {}
         
-        # Outcome tracking for ML
-        self.outcome_tracking = {
-            'update_interval_minutes': 5,
-            'track_duration_hours': 24
+        # Performance metrics
+        self.daily_metrics = {
+            'trades_executed': 0,
+            'winning_trades': 0,
+            'losing_trades': 0,
+            'total_pnl': 0.0
         }
         
-        # Initialize database
-        self._init_database_schema()
+        # Setup routes
+        self.setup_routes()
         
-        # Start background threads
-        self._start_position_monitor()
-        self._start_outcome_tracker()
+        # Start background tasks
+        self.start_position_monitor()
+        self.start_order_monitor()
         
         # Register with coordination
         self._register_with_coordination()
         
-        self.logger.info("Catalyst-Aware Paper Trading v2.0.0 initialized")
+        self.logger.info("Trading Service v2.1.0 initialized",
+                        environment=os.getenv('ENVIRONMENT', 'development'),
+                        alpaca_connected=self.alpaca is not None)
+        
+    def setup_environment(self):
+        """Setup environment variables and paths"""
+        # Paths
+        self.log_path = os.getenv('LOG_PATH', '/app/logs')
+        self.data_path = os.getenv('DATA_PATH', '/app/data')
+        
+        # Create directories
+        os.makedirs(self.log_path, exist_ok=True)
+        os.makedirs(self.data_path, exist_ok=True)
+        
+        # Service configuration
+        self.service_name = 'paper_trading'
+        self.port = int(os.getenv('PORT', '5005'))
+        self.log_level = os.getenv('LOG_LEVEL', 'INFO')
         
     def setup_logging(self):
-        """Setup logging configuration"""
-        self.logger = logging.getLogger('paper_trading')
-        self.logger.setLevel(logging.INFO)
+        """Setup structured logging"""
+        self.logger = get_logger()
+        self.logger = self.logger.bind(service=self.service_name)
         
-        # Create logs directory
-        os.makedirs('/tmp/logs', exist_ok=True)
-        
-        # File handler
-        fh = logging.FileHandler('/tmp//tmp/logs/paper_trading.log')
-        fh.setLevel(logging.INFO)
-        
-        # Console handler
-        ch = logging.StreamHandler()
-        ch.setLevel(logging.INFO)
-        
-        # Formatter
-        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-        fh.setFormatter(formatter)
-        ch.setFormatter(formatter)
-        
-        self.logger.addHandler(fh)
-        self.logger.addHandler(ch)
-        
-    def _init_database_schema(self):
-        """Initialize trading tables with outcome tracking"""
+    def _init_alpaca(self) -> Optional[tradeapi.REST]:
+        """Initialize Alpaca API connection"""
         try:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
+            api_key = os.getenv('ALPACA_API_KEY')
+            secret_key = os.getenv('ALPACA_SECRET_KEY')
+            base_url = os.getenv('ALPACA_BASE_URL', 'https://paper-api.alpaca.markets')
             
-            # Enhanced trade records table
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS trade_records (
-                    trade_id TEXT PRIMARY KEY,
-                    signal_id TEXT,
-                    symbol TEXT NOT NULL,
-                    
-                    -- Execution details
-                    order_id TEXT,
-                    order_type TEXT,  -- market, limit
-                    side TEXT NOT NULL,  -- buy, sell
-                    quantity INTEGER NOT NULL,
-                    
-                    -- Entry details
-                    entry_price DECIMAL(10,2),
-                    entry_timestamp TIMESTAMP,
-                    entry_commission DECIMAL(10,2),
-                    
-                    -- Exit details
-                    exit_price DECIMAL(10,2),
-                    exit_timestamp TIMESTAMP,
-                    exit_reason TEXT,  -- stop_loss, target_1, target_2, time_stop, trailing_stop
-                    exit_commission DECIMAL(10,2),
-                    
-                    -- P&L tracking
-                    pnl_amount DECIMAL(10,2),
-                    pnl_percentage DECIMAL(5,2),
-                    max_profit DECIMAL(10,2),
-                    max_loss DECIMAL(10,2),
-                    
-                    -- Catalyst tracking
-                    entry_catalyst TEXT,
-                    entry_news_id TEXT,  -- Links to news_raw
-                    catalyst_score_at_entry DECIMAL(5,2),
-                    catalyst_type TEXT,
-                    
-                    -- Market state
-                    market_state_at_entry TEXT,  -- pre-market, regular, after-hours
-                    
-                    -- Risk management
-                    stop_loss_price DECIMAL(10,2),
-                    target_1_price DECIMAL(10,2),
-                    target_2_price DECIMAL(10,2),
-                    position_size_pct DECIMAL(5,2),
-                    
-                    -- Outcome tracking
-                    time_to_stop_minutes INTEGER,
-                    time_to_target_minutes INTEGER,
-                    pattern_confirmed BOOLEAN,
-                    catalyst_outcome TEXT,  -- successful, failed, mixed
-                    
-                    -- ML features
-                    ml_outcome_data JSON,
-                    
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    
-                    FOREIGN KEY (signal_id) REFERENCES trading_signals(signal_id),
-                    FOREIGN KEY (entry_news_id) REFERENCES news_raw(news_id)
-                )
-            ''')
+            if not api_key or not secret_key:
+                self.logger.warning("Alpaca API keys not configured")
+                return None
+                
+            api = tradeapi.REST(
+                api_key,
+                secret_key,
+                base_url,
+                api_version='v2'
+            )
             
-            # Active positions table
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS active_positions (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    symbol TEXT NOT NULL UNIQUE,
-                    trade_id TEXT NOT NULL,
-                    
-                    -- Position details
-                    quantity INTEGER NOT NULL,
-                    entry_price DECIMAL(10,2),
-                    current_price DECIMAL(10,2),
-                    
-                    -- P&L tracking
-                    unrealized_pnl DECIMAL(10,2),
-                    unrealized_pnl_pct DECIMAL(5,2),
-                    high_price DECIMAL(10,2),  -- For trailing stops
-                    low_price DECIMAL(10,2),
-                    
-                    -- Risk levels
-                    stop_loss DECIMAL(10,2),
-                    target_1 DECIMAL(10,2),
-                    target_2 DECIMAL(10,2),
-                    trailing_stop_pct DECIMAL(5,2),
-                    
-                    -- Status
-                    status TEXT DEFAULT 'open',  -- open, closing, closed
-                    partial_exit_qty INTEGER DEFAULT 0,
-                    
-                    last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    
-                    FOREIGN KEY (trade_id) REFERENCES trade_records(trade_id)
-                )
-            ''')
+            # Test connection
+            account = api.get_account()
+            self.logger.info("Alpaca API connected",
+                           account_status=account.status,
+                           buying_power=account.buying_power)
             
-            # Trading performance table
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS trading_performance (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    date DATE NOT NULL UNIQUE,
-                    
-                    -- Daily metrics
-                    trades_executed INTEGER DEFAULT 0,
-                    winning_trades INTEGER DEFAULT 0,
-                    losing_trades INTEGER DEFAULT 0,
-                    win_rate DECIMAL(5,2),
-                    
-                    -- P&L metrics
-                    gross_pnl DECIMAL(10,2),
-                    commissions DECIMAL(10,2),
-                    net_pnl DECIMAL(10,2),
-                    
-                    -- Risk metrics
-                    max_drawdown DECIMAL(10,2),
-                    sharpe_ratio DECIMAL(5,2),
-                    
-                    -- Catalyst performance
-                    catalyst_trades INTEGER DEFAULT 0,
-                    catalyst_win_rate DECIMAL(5,2),
-                    
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            ''')
-            
-            # Create indexes
-            cursor.execute('''
-                CREATE INDEX IF NOT EXISTS idx_trades_symbol 
-                ON trade_records(symbol, entry_timestamp)
-            ''')
-            
-            cursor.execute('''
-                CREATE INDEX IF NOT EXISTS idx_trades_open 
-                ON trade_records(exit_timestamp) 
-                WHERE exit_timestamp IS NULL
-            ''')
-            
-            cursor.execute('''
-                CREATE INDEX IF NOT EXISTS idx_positions_active 
-                ON active_positions(status) 
-                WHERE status = 'open'
-            ''')
-            
-            conn.commit()
-            conn.close()
-            
-            self.logger.info("Database schema initialized")
+            return api
             
         except Exception as e:
-            self.logger.error(f"Error initializing database: {e}")
-            raise
+            self.logger.error("Failed to initialize Alpaca API", error=str(e))
+            return None
             
     def setup_routes(self):
         """Setup Flask routes"""
         @self.app.route('/health', methods=['GET'])
         def health():
+            db_health = health_check()
+            alpaca_health = self._check_alpaca_health()
+            
+            overall_health = (
+                db_health['database'] == 'healthy' and
+                db_health['redis'] == 'healthy' and
+                alpaca_health
+            )
+            
             return jsonify({
-                "status": "healthy",
+                "status": "healthy" if overall_health else "degraded",
                 "service": "paper_trading",
-                "version": "2.0.0",
-                "mode": "catalyst-aware",
-                "alpaca_connected": self.alpaca_client is not None,
-                "active_positions": len(self.active_positions),
-                "daily_pnl": round(self.daily_pnl, 2),
+                "version": "2.1.0",
+                "database": db_health['database'],
+                "redis": db_health['redis'],
+                "alpaca": "connected" if alpaca_health else "disconnected",
                 "timestamp": datetime.now().isoformat()
             })
             
         @self.app.route('/execute_trade', methods=['POST'])
         def execute_trade():
-            """Execute a trading signal"""
+            """Execute a trade based on signal"""
             signal = request.json
             
-            # Validate signal
-            if not self._validate_signal(signal):
-                return jsonify({'error': 'Invalid signal format'}), 400
+            if not signal or not signal.get('symbol'):
+                return jsonify({'error': 'Invalid signal data'}), 400
                 
-            # Check risk limits
-            risk_check = self._check_risk_limits(signal)
-            if not risk_check['allowed']:
-                return jsonify({
-                    'error': 'Risk limit exceeded',
-                    'reason': risk_check['reason']
-                }), 400
-                
-            # Execute trade
             result = self.execute_signal(signal)
             return jsonify(result)
             
         @self.app.route('/positions', methods=['GET'])
         def get_positions():
             """Get current positions"""
+            positions = self.get_current_positions()
             return jsonify({
-                'positions': list(self.active_positions.values()),
-                'count': len(self.active_positions),
-                'timestamp': datetime.now().isoformat()
+                'count': len(positions),
+                'positions': positions,
+                'summary': self._calculate_position_summary(positions)
             })
             
-        @self.app.route('/orders', methods=['GET'])
-        def get_orders():
-            """Get recent orders"""
-            limit = request.args.get('limit', 10, type=int)
-            orders = self._get_recent_orders(limit)
-            return jsonify({'orders': orders})
-            
+        @self.app.route('/position/<symbol>', methods=['GET'])
+        def get_position(symbol):
+            """Get position for specific symbol"""
+            position = self.get_position_details(symbol)
+            if position:
+                return jsonify(position)
+            else:
+                return jsonify({'error': f'No position found for {symbol}'}), 404
+                
         @self.app.route('/close_position', methods=['POST'])
         def close_position():
-            """Manually close a position"""
+            """Close a specific position"""
             data = request.json
             symbol = data.get('symbol')
             reason = data.get('reason', 'manual_close')
             
-            if symbol not in self.active_positions:
-                return jsonify({'error': 'Position not found'}), 404
+            if not symbol:
+                return jsonify({'error': 'Symbol required'}), 400
                 
-            result = self.close_position(symbol, reason)
+            result = self.close_position_for_symbol(symbol, reason)
             return jsonify(result)
+            
+        @self.app.route('/close_all', methods=['POST'])
+        def close_all():
+            """Close all positions"""
+            reason = request.json.get('reason', 'manual_close_all')
+            results = self.close_all_positions(reason)
+            return jsonify({'results': results})
+            
+        @self.app.route('/orders', methods=['GET'])
+        def get_orders():
+            """Get recent orders"""
+            status = request.args.get('status', 'all')
+            limit = request.args.get('limit', 50, type=int)
+            
+            orders = self.get_recent_orders(status, limit)
+            return jsonify({
+                'count': len(orders),
+                'orders': orders
+            })
+            
+        @self.app.route('/portfolio', methods=['GET'])
+        def get_portfolio():
+            """Get portfolio summary"""
+            portfolio = self.get_portfolio_summary()
+            return jsonify(portfolio)
             
         @self.app.route('/performance', methods=['GET'])
         def get_performance():
             """Get trading performance metrics"""
-            days = request.args.get('days', 7, type=int)
-            performance = self._get_performance_metrics(days)
-            return jsonify(performance)
+            period = request.args.get('period', 'day')
+            metrics = self.get_performance_metrics(period)
+            return jsonify(metrics)
             
         @self.app.route('/update_stops', methods=['POST'])
         def update_stops():
@@ -391,666 +293,972 @@ class CatalystAwarePaperTrading(DatabaseServiceMixin if USE_DB_UTILS else object
             symbol = data.get('symbol')
             new_stop = data.get('stop_loss')
             
-            if symbol not in self.active_positions:
-                return jsonify({'error': 'Position not found'}), 404
+            if not symbol or not new_stop:
+                return jsonify({'error': 'Symbol and stop_loss required'}), 400
                 
-            result = self._update_stop_loss(symbol, new_stop)
+            result = self.update_stop_loss(symbol, new_stop)
             return jsonify(result)
             
-    def _init_alpaca_client(self) -> Optional[REST]:
-        """Initialize Alpaca API client"""
-        if not ALPACA_AVAILABLE:
-            self.logger.warning("Alpaca API not available, using mock trading")
-            return None
-            
-        if not self.alpaca_config['api_key'] or not self.alpaca_config['secret_key']:
-            self.logger.warning("Alpaca credentials not configured")
-            return None
-            
-        try:
-            client = REST(
-                self.alpaca_config['api_key'],
-                self.alpaca_config['secret_key'],
-                self.alpaca_config['base_url'],
-                api_version=self.alpaca_config['api_version']
-            )
-            
-            # Test connection
-            account = client.get_account()
-            self.logger.info(f"Connected to Alpaca. Account status: {account.status}")
-            
-            return client
-            
-        except Exception as e:
-            self.logger.error(f"Failed to initialize Alpaca client: {e}")
-            return None
-            
     def execute_signal(self, signal: Dict) -> Dict:
-        """
-        Execute a trading signal
-        This is where signals become real trades!
-        """
-        self.logger.info(f"Executing signal for {signal['symbol']}: {signal['signal_type']}")
-        
+        """Execute a trading signal"""
         try:
-            # Generate trade ID
-            trade_id = f"TRD_{signal['symbol']}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            symbol = signal['symbol']
+            direction = signal.get('signal', signal.get('direction'))  # BUY or SELL
             
-            # Calculate position size
-            position_size = self._calculate_position_size(signal)
-            if position_size == 0:
+            self.logger.info("Executing signal",
+                           symbol=symbol,
+                           direction=direction,
+                           confidence=signal.get('confidence'))
+            
+            # Check if we already have a position
+            existing_position = self.get_position_details(symbol)
+            if existing_position:
                 return {
                     'status': 'rejected',
-                    'reason': 'Position size too small',
-                    'symbol': signal['symbol']
+                    'reason': 'Already have position',
+                    'existing_position': existing_position
                 }
                 
-            # Determine market state
-            market_state = self._get_market_state()
-            
-            # Place order
-            if self.alpaca_client:
-                order = self._place_alpaca_order(signal, position_size)
-                order_id = order.id
-            else:
-                # Mock order for testing
-                order_id = f"MOCK_{trade_id}"
-                order = self._create_mock_order(signal, position_size)
+            # Check position limits
+            current_positions = self.get_current_positions()
+            if len(current_positions) >= self.trading_config['max_positions']:
+                return {
+                    'status': 'rejected',
+                    'reason': f"Maximum positions ({self.trading_config['max_positions']}) reached"
+                }
                 
-            # Record trade
-            self._record_trade_entry(trade_id, signal, order, market_state)
+            # Calculate position size
+            position_size = self._calculate_position_size(signal)
+            if position_size <= 0:
+                return {
+                    'status': 'rejected',
+                    'reason': 'Invalid position size calculated'
+                }
+                
+            # Get current price
+            current_price = self._get_current_price(symbol)
+            if not current_price:
+                return {
+                    'status': 'error',
+                    'reason': 'Could not get current price'
+                }
+                
+            # Calculate shares
+            shares = int(position_size / current_price)
+            if shares < 1:
+                return {
+                    'status': 'rejected',
+                    'reason': 'Position size too small'
+                }
+                
+            # Prepare order
+            order_params = self._prepare_order(
+                symbol, direction, shares, current_price, signal
+            )
             
-            # Update active positions
-            self.active_positions[signal['symbol']] = {
-                'symbol': signal['symbol'],
-                'trade_id': trade_id,
-                'quantity': position_size,
-                'entry_price': signal['recommended_entry'],
-                'stop_loss': signal['stop_loss'],
-                'target_1': signal['target_1'],
-                'target_2': signal['target_2'],
-                'catalyst_type': signal.get('catalyst_type'),
-                'catalyst_score': signal.get('catalyst_score'),
-                'status': 'open',
-                'entry_time': datetime.now().isoformat()
-            }
+            # Execute order
+            order_result = self._execute_order(order_params)
             
-            self.logger.info(f"Trade executed: {trade_id} for {signal['symbol']}")
-            
-            return {
-                'status': 'success',
-                'trade_id': trade_id,
-                'order_id': order_id,
-                'symbol': signal['symbol'],
-                'quantity': position_size,
-                'entry_price': signal['recommended_entry']
-            }
-            
+            if order_result['status'] == 'success':
+                # Record trade in database
+                trade_record = self._create_trade_record(
+                    signal, order_result['order'], order_params
+                )
+                trade_id = insert_trade_record(trade_record)
+                
+                # Set stop loss and take profit orders
+                self._set_exit_orders(
+                    symbol, direction, order_result['fill_price'],
+                    signal, trade_id
+                )
+                
+                # Update metrics
+                self.daily_metrics['trades_executed'] += 1
+                
+                return {
+                    'status': 'success',
+                    'trade_id': trade_id,
+                    'order_id': order_result['order_id'],
+                    'symbol': symbol,
+                    'direction': direction,
+                    'shares': shares,
+                    'entry_price': order_result['fill_price'],
+                    'position_value': shares * order_result['fill_price']
+                }
+            else:
+                return order_result
+                
         except Exception as e:
-            self.logger.error(f"Error executing signal: {e}")
+            self.logger.error("Error executing signal",
+                            symbol=signal.get('symbol'),
+                            error=str(e))
             return {
                 'status': 'error',
-                'error': str(e),
-                'symbol': signal['symbol']
+                'reason': str(e)
             }
             
-    def close_position(self, symbol: str, reason: str = 'manual') -> Dict:
-        """Close an existing position"""
-        if symbol not in self.active_positions:
-            return {'error': 'Position not found'}
-            
-        position = self.active_positions[symbol]
-        
+    def get_current_positions(self) -> List[Dict]:
+        """Get all current positions"""
         try:
-            # Place closing order
-            if self.alpaca_client:
-                order = self._place_closing_order(symbol, position['quantity'])
-                exit_price = float(order.filled_avg_price) if order.filled_avg_price else position['current_price']
+            if self.alpaca:
+                # Get from Alpaca
+                positions = self.alpaca.list_positions()
+                
+                position_list = []
+                for pos in positions:
+                    # Get additional data from database
+                    db_position = self._get_db_position_data(pos.symbol)
+                    
+                    position_dict = {
+                        'symbol': pos.symbol,
+                        'quantity': int(pos.qty),
+                        'side': pos.side,
+                        'avg_entry_price': float(pos.avg_entry_price),
+                        'current_price': float(pos.current_price) if pos.current_price else 0,
+                        'market_value': float(pos.market_value),
+                        'cost_basis': float(pos.cost_basis),
+                        'unrealized_pnl': float(pos.unrealized_pl),
+                        'unrealized_pnl_pct': float(pos.unrealized_plpc) * 100,
+                        'entry_time': db_position.get('entry_timestamp'),
+                        'trade_id': db_position.get('trade_id'),
+                        'signal_id': db_position.get('signal_id'),
+                        'stop_loss': db_position.get('stop_loss'),
+                        'take_profit': db_position.get('take_profit')
+                    }
+                    position_list.append(position_dict)
+                    
+                return position_list
             else:
-                # Mock exit
-                exit_price = self._get_current_price(symbol)
+                # Get from database
+                return get_open_positions()
                 
-            # Calculate P&L
-            pnl = self._calculate_pnl(
-                position['quantity'],
-                position['entry_price'],
-                exit_price
-            )
-            
-            # Update trade record
-            self._record_trade_exit(position['trade_id'], exit_price, reason, pnl)
-            
-            # Update daily P&L
-            self.daily_pnl += pnl['net_pnl']
-            
-            # Remove from active positions
-            del self.active_positions[symbol]
-            
-            # Trigger outcome tracking
-            self._queue_outcome_tracking(position['trade_id'], position)
-            
-            self.logger.info(f"Closed position {symbol}: P&L ${pnl['net_pnl']:.2f}")
-            
-            return {
-                'status': 'closed',
-                'symbol': symbol,
-                'exit_price': exit_price,
-                'pnl': pnl['net_pnl'],
-                'reason': reason
-            }
-            
         except Exception as e:
-            self.logger.error(f"Error closing position: {e}")
-            return {'error': str(e)}
-            
-    def _validate_signal(self, signal: Dict) -> bool:
-        """Validate trading signal format"""
-        required_fields = [
-            'symbol', 'signal_type', 'confidence',
-            'recommended_entry', 'stop_loss', 'target_1'
-        ]
-        
-        for field in required_fields:
-            if field not in signal:
-                self.logger.error(f"Missing required field: {field}")
-                return False
-                
-        # Validate signal type
-        if signal['signal_type'] not in ['BUY', 'SELL']:
-            self.logger.error(f"Invalid signal type: {signal['signal_type']}")
-            return False
-            
-        # Validate prices
-        if signal['stop_loss'] >= signal['recommended_entry'] and signal['signal_type'] == 'BUY':
-            self.logger.error("Stop loss must be below entry for BUY signals")
-            return False
-            
-        return True
-        
-    def _check_risk_limits(self, signal: Dict) -> Dict:
-        """Check if trade passes risk management rules"""
-        # Check max positions
-        if len(self.active_positions) >= self.risk_params['max_positions']:
-            return {
-                'allowed': False,
-                'reason': f"Max positions ({self.risk_params['max_positions']}) reached"
-            }
-            
-        # Check if already in position
-        if signal['symbol'] in self.active_positions:
-            return {
-                'allowed': False,
-                'reason': f"Already in position for {signal['symbol']}"
-            }
-            
-        # Check daily loss limit
-        if self.daily_pnl <= -self._get_daily_loss_limit():
-            return {
-                'allowed': False,
-                'reason': "Daily loss limit reached"
-            }
-            
-        # Check price range
-        price = signal['recommended_entry']
-        if price < self.risk_params['min_price'] or price > self.risk_params['max_price']:
-            return {
-                'allowed': False,
-                'reason': f"Price ${price} outside allowed range"
-            }
-            
-        return {'allowed': True}
-        
-    def _calculate_position_size(self, signal: Dict) -> int:
-        """
-        Calculate position size based on account and signal confidence
-        """
-        try:
-            if self.alpaca_client:
-                account = self.alpaca_client.get_account()
-                buying_power = float(account.buying_power)
-            else:
-                # Mock account
-                buying_power = 100000  # $100k paper trading
-                
-            # Get position size percentage from signal
-            position_pct = signal.get('position_size_pct', 10) / 100
-            
-            # Apply pre-market limits
-            if signal.get('is_pre_market'):
-                max_pct = self.risk_params['pre_market_position_pct'] / 100
-                position_pct = min(position_pct, max_pct)
-            else:
-                max_pct = self.risk_params['max_position_size_pct'] / 100
-                position_pct = min(position_pct, max_pct)
-                
-            # Calculate dollar amount
-            position_value = buying_power * position_pct
-            
-            # Calculate shares
-            shares = int(position_value / signal['recommended_entry'])
-            
-            # Minimum 1 share
-            return max(1, shares)
-            
-        except Exception as e:
-            self.logger.error(f"Error calculating position size: {e}")
-            return 0
-            
-    def _place_alpaca_order(self, signal: Dict, quantity: int):
-        """Place order via Alpaca API"""
-        try:
-            # Determine order type
-            if signal.get('is_pre_market'):
-                # Use limit order for pre-market
-                order = self.alpaca_client.submit_order(
-                    symbol=signal['symbol'],
-                    qty=quantity,
-                    side='buy' if signal['signal_type'] == 'BUY' else 'sell',
-                    type='limit',
-                    limit_price=signal['recommended_entry'],
-                    time_in_force='day',
-                    extended_hours=True  # Allow pre-market trading
-                )
-            else:
-                # Market order during regular hours
-                order = self.alpaca_client.submit_order(
-                    symbol=signal['symbol'],
-                    qty=quantity,
-                    side='buy' if signal['signal_type'] == 'BUY' else 'sell',
-                    type='market',
-                    time_in_force='day'
-                )
-                
-            self.logger.info(f"Alpaca order placed: {order.id}")
-            return order
-            
-        except Exception as e:
-            self.logger.error(f"Alpaca order failed: {e}")
-            raise
-            
-    def _place_closing_order(self, symbol: str, quantity: int):
-        """Place closing order"""
-        try:
-            order = self.alpaca_client.submit_order(
-                symbol=symbol,
-                qty=quantity,
-                side='sell',  # Always sell to close long positions
-                type='market',
-                time_in_force='day'
-            )
-            
-            # Wait for fill
-            time.sleep(2)
-            order = self.alpaca_client.get_order(order.id)
-            
-            return order
-            
-        except Exception as e:
-            self.logger.error(f"Closing order failed: {e}")
-            raise
-            
-    def _create_mock_order(self, signal: Dict, quantity: int) -> Dict:
-        """Create mock order for testing"""
-        return {
-            'id': f"MOCK_{datetime.now().timestamp()}",
-            'symbol': signal['symbol'],
-            'qty': quantity,
-            'side': 'buy' if signal['signal_type'] == 'BUY' else 'sell',
-            'filled_avg_price': signal['recommended_entry'],
-            'status': 'filled',
-            'filled_at': datetime.now().isoformat()
-        }
-        
-    def _record_trade_entry(self, trade_id: str, signal: Dict, order: Dict, market_state: str):
-        """Record trade entry in database"""
-        try:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-            
-            cursor.execute('''
-                INSERT INTO trade_records (
-                    trade_id, signal_id, symbol, order_id, order_type,
-                    side, quantity, entry_price, entry_timestamp,
-                    entry_catalyst, catalyst_type, catalyst_score_at_entry,
-                    market_state_at_entry, stop_loss_price, target_1_price,
-                    target_2_price, position_size_pct, entry_news_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (
-                trade_id, signal.get('signal_id'), signal['symbol'],
-                order.id if hasattr(order, 'id') else order['id'],
-                'market', signal['signal_type'].lower(),
-                order.qty if hasattr(order, 'qty') else order['qty'],
-                float(order.filled_avg_price) if hasattr(order, 'filled_avg_price') else order['filled_avg_price'],
-                datetime.now(), signal.get('catalyst_type'),
-                signal.get('catalyst_type'), signal.get('catalyst_score'),
-                market_state, signal['stop_loss'], signal['target_1'],
-                signal.get('target_2'), signal.get('position_size_pct'),
-                signal.get('entry_news_id')
-            ))
-            
-            conn.commit()
-            conn.close()
-            
-        except Exception as e:
-            self.logger.error(f"Error recording trade entry: {e}")
-            
-    def _record_trade_exit(self, trade_id: str, exit_price: float, 
-                          exit_reason: str, pnl: Dict):
-        """Record trade exit in database"""
-        try:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-            
-            cursor.execute('''
-                UPDATE trade_records
-                SET exit_price = ?,
-                    exit_timestamp = ?,
-                    exit_reason = ?,
-                    pnl_amount = ?,
-                    pnl_percentage = ?,
-                    updated_at = ?
-                WHERE trade_id = ?
-            ''', (
-                exit_price, datetime.now(), exit_reason,
-                pnl['net_pnl'], pnl['pnl_pct'],
-                datetime.now(), trade_id
-            ))
-            
-            conn.commit()
-            conn.close()
-            
-        except Exception as e:
-            self.logger.error(f"Error recording trade exit: {e}")
-            
-    def _calculate_pnl(self, quantity: int, entry_price: float, 
-                      exit_price: float) -> Dict:
-        """Calculate P&L for a trade"""
-        gross_pnl = (exit_price - entry_price) * quantity
-        
-        # Estimate commission (Alpaca has no commission, but good to track)
-        commission = 0  # Could add SEC/FINRA fees here
-        
-        net_pnl = gross_pnl - commission
-        pnl_pct = ((exit_price - entry_price) / entry_price) * 100
-        
-        return {
-            'gross_pnl': round(gross_pnl, 2),
-            'commission': round(commission, 2),
-            'net_pnl': round(net_pnl, 2),
-            'pnl_pct': round(pnl_pct, 2)
-        }
-        
-    def _get_market_state(self) -> str:
-        """Determine current market state"""
-        now = datetime.now()
-        hour = now.hour
-        minute = now.minute
-        weekday = now.weekday()
-        
-        # Weekend
-        if weekday >= 5:
-            return 'weekend'
-            
-        # Convert to market time (EST)
-        # This is simplified - should use proper timezone handling
-        if 4 <= hour < 9 or (hour == 9 and minute < 30):
-            return 'pre-market'
-        elif (hour == 9 and minute >= 30) or (10 <= hour < 16):
-            return 'regular'
-        elif 16 <= hour < 20:
-            return 'after-hours'
-        else:
-            return 'closed'
-            
-    def _get_current_price(self, symbol: str) -> float:
-        """Get current price for a symbol"""
-        if self.alpaca_client:
-            try:
-                quote = self.alpaca_client.get_latest_quote(symbol)
-                return float(quote.ap)  # Ask price
-            except:
-                pass
-                
-        # Mock price with small random change
-        import random
-        if symbol in self.active_positions:
-            base_price = self.active_positions[symbol]['entry_price']
-            return base_price * (1 + random.uniform(-0.02, 0.02))
-        return 100.0
-        
-    def _get_daily_loss_limit(self) -> float:
-        """Calculate daily loss limit"""
-        if self.alpaca_client:
-            try:
-                account = self.alpaca_client.get_account()
-                equity = float(account.equity)
-                return equity * (self.risk_params['max_daily_loss_pct'] / 100)
-            except:
-                pass
-                
-        # Mock limit
-        return 5000  # $5k daily loss limit
-        
-    def _update_stop_loss(self, symbol: str, new_stop: float) -> Dict:
-        """Update stop loss for a position"""
-        if symbol not in self.active_positions:
-            return {'error': 'Position not found'}
-            
-        position = self.active_positions[symbol]
-        
-        # Validate new stop
-        current_price = self._get_current_price(symbol)
-        if new_stop >= current_price:
-            return {'error': 'Stop loss must be below current price'}
-            
-        # Update position
-        position['stop_loss'] = new_stop
-        
-        # Update in database
-        try:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-            
-            cursor.execute('''
-                UPDATE active_positions
-                SET stop_loss = ?, last_updated = ?
-                WHERE symbol = ?
-            ''', (new_stop, datetime.now(), symbol))
-            
-            conn.commit()
-            conn.close()
-            
-            return {
-                'status': 'updated',
-                'symbol': symbol,
-                'new_stop': new_stop
-            }
-            
-        except Exception as e:
-            return {'error': str(e)}
-            
-    def _start_position_monitor(self):
-        """Start thread to monitor positions"""
-        def monitor_positions():
-            while True:
-                try:
-                    self._check_all_positions()
-                    time.sleep(30)  # Check every 30 seconds
-                except Exception as e:
-                    self.logger.error(f"Position monitor error: {e}")
-                    
-        thread = threading.Thread(target=monitor_positions)
-        thread.daemon = True
-        thread.start()
-        
-    def _check_all_positions(self):
-        """Check all positions for stops/targets"""
-        for symbol, position in list(self.active_positions.items()):
-            try:
-                current_price = self._get_current_price(symbol)
-                position['current_price'] = current_price
-                
-                # Update unrealized P&L
-                pnl = self._calculate_pnl(
-                    position['quantity'],
-                    position['entry_price'],
-                    current_price
-                )
-                position['unrealized_pnl'] = pnl['net_pnl']
-                position['unrealized_pnl_pct'] = pnl['pnl_pct']
-                
-                # Check stop loss
-                if current_price <= position['stop_loss']:
-                    self.logger.info(f"Stop loss triggered for {symbol}")
-                    self.close_position(symbol, 'stop_loss')
-                    continue
-                    
-                # Check targets
-                if current_price >= position.get('target_2', float('inf')):
-                    self.logger.info(f"Target 2 reached for {symbol}")
-                    self.close_position(symbol, 'target_2')
-                elif current_price >= position.get('target_1', float('inf')):
-                    # Could implement partial exit here
-                    self.logger.info(f"Target 1 reached for {symbol}")
-                    
-                # Update high water mark for trailing stops
-                if current_price > position.get('high_price', position['entry_price']):
-                    position['high_price'] = current_price
-                    
-            except Exception as e:
-                self.logger.error(f"Error checking position {symbol}: {e}")
-                
-    def _start_outcome_tracker(self):
-        """Start thread to track trade outcomes"""
-        def track_outcomes():
-            while True:
-                try:
-                    self._process_outcome_queue()
-                    time.sleep(60)  # Check every minute
-                except Exception as e:
-                    self.logger.error(f"Outcome tracker error: {e}")
-                    
-        thread = threading.Thread(target=track_outcomes)
-        thread.daemon = True
-        thread.start()
-        
-    def _queue_outcome_tracking(self, trade_id: str, position: Dict):
-        """Queue a trade for outcome tracking"""
-        self.trade_queue.put({
-            'trade_id': trade_id,
-            'position': position,
-            'timestamp': datetime.now()
-        })
-        
-    def _process_outcome_queue(self):
-        """Process trades waiting for outcome tracking"""
-        # This would update news accuracy based on trade outcomes
-        pass
-        
-    def _get_recent_orders(self, limit: int) -> List[Dict]:
-        """Get recent orders from database"""
-        try:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-            
-            cursor.execute('''
-                SELECT trade_id, symbol, side, quantity, entry_price,
-                       entry_timestamp, exit_price, exit_timestamp,
-                       pnl_amount, exit_reason
-                FROM trade_records
-                ORDER BY entry_timestamp DESC
-                LIMIT ?
-            ''', (limit,))
-            
-            orders = []
-            for row in cursor.fetchall():
-                orders.append({
-                    'trade_id': row[0],
-                    'symbol': row[1],
-                    'side': row[2],
-                    'quantity': row[3],
-                    'entry_price': row[4],
-                    'entry_time': row[5],
-                    'exit_price': row[6],
-                    'exit_time': row[7],
-                    'pnl': row[8],
-                    'exit_reason': row[9]
-                })
-                
-            conn.close()
-            return orders
-            
-        except Exception as e:
-            self.logger.error(f"Error getting orders: {e}")
+            self.logger.error("Error getting positions", error=str(e))
             return []
             
-    def _get_performance_metrics(self, days: int) -> Dict:
-        """Calculate performance metrics"""
+    def get_position_details(self, symbol: str) -> Optional[Dict]:
+        """Get details for a specific position"""
+        positions = self.get_current_positions()
+        for pos in positions:
+            if pos['symbol'] == symbol:
+                return pos
+        return None
+        
+    def close_position_for_symbol(self, symbol: str, reason: str = 'manual') -> Dict:
+        """Close position for a specific symbol"""
         try:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-            
-            # Get trades from last N days
-            cursor.execute('''
-                SELECT COUNT(*) as total_trades,
-                       SUM(CASE WHEN pnl_amount > 0 THEN 1 ELSE 0 END) as winning_trades,
-                       SUM(CASE WHEN pnl_amount < 0 THEN 1 ELSE 0 END) as losing_trades,
-                       SUM(pnl_amount) as total_pnl,
-                       AVG(pnl_percentage) as avg_pnl_pct,
-                       MAX(pnl_amount) as best_trade,
-                       MIN(pnl_amount) as worst_trade
-                FROM trade_records
-                WHERE entry_timestamp > datetime('now', '-{} days')
-                AND exit_timestamp IS NOT NULL
-            '''.format(days))
-            
-            metrics = cursor.fetchone()
-            
-            total_trades = metrics[0] or 0
-            winning_trades = metrics[1] or 0
-            losing_trades = metrics[2] or 0
-            
-            win_rate = (winning_trades / total_trades * 100) if total_trades > 0 else 0
-            
-            performance = {
-                'period_days': days,
-                'total_trades': total_trades,
-                'winning_trades': winning_trades,
-                'losing_trades': losing_trades,
-                'win_rate': round(win_rate, 2),
-                'total_pnl': round(metrics[3] or 0, 2),
-                'avg_pnl_pct': round(metrics[4] or 0, 2),
-                'best_trade': round(metrics[5] or 0, 2),
-                'worst_trade': round(metrics[6] or 0, 2)
-            }
-            
-            # Get catalyst performance
-            cursor.execute('''
-                SELECT catalyst_type, COUNT(*) as count,
-                       AVG(pnl_percentage) as avg_pnl
-                FROM trade_records
-                WHERE entry_timestamp > datetime('now', '-{} days')
-                AND exit_timestamp IS NOT NULL
-                AND catalyst_type IS NOT NULL
-                GROUP BY catalyst_type
-            '''.format(days))
-            
-            catalyst_performance = {}
-            for row in cursor.fetchall():
-                catalyst_performance[row[0]] = {
-                    'trades': row[1],
-                    'avg_pnl': round(row[2] or 0, 2)
+            position = self.get_position_details(symbol)
+            if not position:
+                return {
+                    'status': 'error',
+                    'reason': f'No position found for {symbol}'
                 }
                 
-            performance['catalyst_performance'] = catalyst_performance
+            # Cancel any open orders
+            self._cancel_open_orders(symbol)
             
-            conn.close()
-            return performance
+            # Create close order
+            qty = abs(position['quantity'])
+            side = 'sell' if position['side'] == 'long' else 'buy'
+            
+            if self.alpaca:
+                # Submit market order to close
+                order = self.alpaca.submit_order(
+                    symbol=symbol,
+                    qty=qty,
+                    side=side,
+                    type='market',
+                    time_in_force='gtc'
+                )
+                
+                # Wait for fill
+                filled_order = self._wait_for_fill(order.id)
+                
+                if filled_order:
+                    exit_price = float(filled_order.filled_avg_price)
+                    
+                    # Update database
+                    self._update_trade_exit(
+                        position['trade_id'],
+                        exit_price,
+                        reason,
+                        position
+                    )
+                    
+                    # Update metrics
+                    pnl = position['unrealized_pnl']
+                    if pnl > 0:
+                        self.daily_metrics['winning_trades'] += 1
+                    else:
+                        self.daily_metrics['losing_trades'] += 1
+                    self.daily_metrics['total_pnl'] += pnl
+                    
+                    return {
+                        'status': 'success',
+                        'symbol': symbol,
+                        'exit_price': exit_price,
+                        'quantity': qty,
+                        'pnl': pnl,
+                        'pnl_pct': position['unrealized_pnl_pct'],
+                        'reason': reason
+                    }
+                else:
+                    return {
+                        'status': 'error',
+                        'reason': 'Order failed to fill'
+                    }
+            else:
+                # Mock close for testing
+                return {
+                    'status': 'success',
+                    'symbol': symbol,
+                    'message': 'Position closed (test mode)'
+                }
+                
+        except Exception as e:
+            self.logger.error("Error closing position",
+                            symbol=symbol,
+                            error=str(e))
+            return {
+                'status': 'error',
+                'reason': str(e)
+            }
+            
+    def close_all_positions(self, reason: str = 'manual') -> List[Dict]:
+        """Close all open positions"""
+        positions = self.get_current_positions()
+        results = []
+        
+        for position in positions:
+            result = self.close_position_for_symbol(position['symbol'], reason)
+            results.append(result)
+            
+        return results
+        
+    def get_recent_orders(self, status: str = 'all', limit: int = 50) -> List[Dict]:
+        """Get recent orders"""
+        try:
+            if self.alpaca:
+                # Get from Alpaca
+                if status == 'all':
+                    orders = self.alpaca.list_orders(status='all', limit=limit)
+                else:
+                    orders = self.alpaca.list_orders(status=status, limit=limit)
+                    
+                order_list = []
+                for order in orders:
+                    order_dict = {
+                        'order_id': order.id,
+                        'symbol': order.symbol,
+                        'side': order.side,
+                        'type': order.order_type,
+                        'quantity': int(order.qty),
+                        'filled_quantity': int(order.filled_qty) if order.filled_qty else 0,
+                        'status': order.status,
+                        'created_at': order.created_at,
+                        'filled_at': order.filled_at,
+                        'limit_price': float(order.limit_price) if order.limit_price else None,
+                        'stop_price': float(order.stop_price) if order.stop_price else None,
+                        'filled_avg_price': float(order.filled_avg_price) if order.filled_avg_price else None
+                    }
+                    order_list.append(order_dict)
+                    
+                return order_list
+            else:
+                return []
+                
+        except Exception as e:
+            self.logger.error("Error getting orders", error=str(e))
+            return []
+            
+    def get_portfolio_summary(self) -> Dict:
+        """Get portfolio summary"""
+        try:
+            if self.alpaca:
+                account = self.alpaca.get_account()
+                positions = self.get_current_positions()
+                
+                # Calculate totals
+                total_value = sum(p['market_value'] for p in positions)
+                total_pnl = sum(p['unrealized_pnl'] for p in positions)
+                
+                return {
+                    'account_value': float(account.equity),
+                    'buying_power': float(account.buying_power),
+                    'cash': float(account.cash),
+                    'positions_value': total_value,
+                    'position_count': len(positions),
+                    'total_unrealized_pnl': total_pnl,
+                    'total_unrealized_pnl_pct': (total_pnl / total_value * 100) if total_value > 0 else 0,
+                    'day_pnl': float(account.equity) - float(account.last_equity),
+                    'positions': positions
+                }
+            else:
+                # Mock data for testing
+                return {
+                    'account_value': 100000,
+                    'buying_power': 50000,
+                    'cash': 50000,
+                    'positions_value': 50000,
+                    'position_count': 3,
+                    'total_unrealized_pnl': 1500,
+                    'total_unrealized_pnl_pct': 3.0,
+                    'day_pnl': 500,
+                    'positions': []
+                }
+                
+        except Exception as e:
+            self.logger.error("Error getting portfolio summary", error=str(e))
+            return {}
+            
+    def get_performance_metrics(self, period: str = 'day') -> Dict:
+        """Get trading performance metrics"""
+        try:
+            with get_db_connection() as conn:
+                with conn.cursor() as cur:
+                    # Determine time range
+                    if period == 'day':
+                        start_time = datetime.now().replace(hour=0, minute=0, second=0)
+                    elif period == 'week':
+                        start_time = datetime.now() - timedelta(days=7)
+                    elif period == 'month':
+                        start_time = datetime.now() - timedelta(days=30)
+                    else:
+                        start_time = datetime.now() - timedelta(days=365)
+                        
+                    # Get trade statistics
+                    cur.execute("""
+                        SELECT 
+                            COUNT(*) as total_trades,
+                            COUNT(CASE WHEN pnl_percentage > 0 THEN 1 END) as winning_trades,
+                            COUNT(CASE WHEN pnl_percentage < 0 THEN 1 END) as losing_trades,
+                            AVG(pnl_percentage) as avg_pnl_pct,
+                            SUM(pnl_amount) as total_pnl,
+                            MAX(pnl_percentage) as best_trade,
+                            MIN(pnl_percentage) as worst_trade,
+                            AVG(CASE WHEN pnl_percentage > 0 THEN pnl_percentage END) as avg_win,
+                            AVG(CASE WHEN pnl_percentage < 0 THEN pnl_percentage END) as avg_loss
+                        FROM trade_records
+                        WHERE entry_timestamp >= %s
+                        AND exit_timestamp IS NOT NULL
+                    """, [start_time])
+                    
+                    stats = cur.fetchone()
+                    
+                    # Calculate additional metrics
+                    total_trades = stats['total_trades'] or 0
+                    winning_trades = stats['winning_trades'] or 0
+                    losing_trades = stats['losing_trades'] or 0
+                    
+                    win_rate = (winning_trades / total_trades * 100) if total_trades > 0 else 0
+                    
+                    avg_win = stats['avg_win'] or 0
+                    avg_loss = stats['avg_loss'] or 0
+                    profit_factor = abs(avg_win / avg_loss) if avg_loss != 0 else 0
+                    
+                    return {
+                        'period': period,
+                        'total_trades': total_trades,
+                        'winning_trades': winning_trades,
+                        'losing_trades': losing_trades,
+                        'win_rate': win_rate,
+                        'avg_pnl_pct': stats['avg_pnl_pct'] or 0,
+                        'total_pnl': stats['total_pnl'] or 0,
+                        'best_trade_pct': stats['best_trade'] or 0,
+                        'worst_trade_pct': stats['worst_trade'] or 0,
+                        'avg_win_pct': avg_win,
+                        'avg_loss_pct': avg_loss,
+                        'profit_factor': profit_factor,
+                        'current_metrics': self.daily_metrics
+                    }
+                    
+        except Exception as e:
+            self.logger.error("Error getting performance metrics", error=str(e))
+            return {}
+            
+    def update_stop_loss(self, symbol: str, new_stop: float) -> Dict:
+        """Update stop loss for a position"""
+        try:
+            position = self.get_position_details(symbol)
+            if not position:
+                return {
+                    'status': 'error',
+                    'reason': f'No position found for {symbol}'
+                }
+                
+            # Cancel existing stop order
+            self._cancel_stop_orders(symbol)
+            
+            # Create new stop order
+            if self.alpaca and position['quantity'] > 0:
+                side = 'sell' if position['side'] == 'long' else 'buy'
+                
+                order = self.alpaca.submit_order(
+                    symbol=symbol,
+                    qty=abs(position['quantity']),
+                    side=side,
+                    type='stop',
+                    stop_price=new_stop,
+                    time_in_force='gtc'
+                )
+                
+                # Update database
+                with get_db_connection() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute("""
+                            UPDATE trade_records
+                            SET stop_loss = %s
+                            WHERE trade_id = %s
+                        """, [new_stop, position['trade_id']])
+                        
+                return {
+                    'status': 'success',
+                    'symbol': symbol,
+                    'new_stop_loss': new_stop,
+                    'order_id': order.id
+                }
+            else:
+                return {
+                    'status': 'success',
+                    'message': 'Stop loss updated (test mode)'
+                }
+                
+        except Exception as e:
+            self.logger.error("Error updating stop loss",
+                            symbol=symbol,
+                            error=str(e))
+            return {
+                'status': 'error',
+                'reason': str(e)
+            }
+            
+    def _calculate_position_size(self, signal: Dict) -> float:
+        """Calculate position size based on signal and risk management"""
+        try:
+            if self.alpaca:
+                account = self.alpaca.get_account()
+                buying_power = float(account.buying_power)
+            else:
+                buying_power = 100000  # Mock value
+                
+            # Get position size percentage from signal or use default
+            position_size_pct = signal.get('position_size_pct', 
+                                         self.trading_config['default_position_size_pct'])
+            
+            # Adjust based on confidence
+            confidence = signal.get('confidence', 50)
+            if confidence > 80:
+                size_multiplier = 1.2
+            elif confidence > 70:
+                size_multiplier = 1.0
+            elif confidence > 60:
+                size_multiplier = 0.8
+            else:
+                size_multiplier = 0.6
+                
+            position_size_pct *= size_multiplier
+            
+            # Apply limits
+            position_size_pct = max(
+                self.trading_config['min_position_size_pct'],
+                min(self.trading_config['max_position_size_pct'], position_size_pct)
+            )
+            
+            # Calculate dollar amount
+            position_size = buying_power * (position_size_pct / 100)
+            
+            # Check portfolio risk
+            current_risk = self._calculate_portfolio_risk()
+            if current_risk + (position_size_pct * 2) > self.trading_config['max_portfolio_risk_pct']:
+                # Reduce position size to stay within risk limits
+                available_risk = self.trading_config['max_portfolio_risk_pct'] - current_risk
+                position_size_pct = max(0, available_risk / 2)
+                position_size = buying_power * (position_size_pct / 100)
+                
+            return position_size
             
         except Exception as e:
-            self.logger.error(f"Error calculating performance: {e}")
-            return {'error': str(e)}
+            self.logger.error("Error calculating position size", error=str(e))
+            return 0
             
+    def _get_current_price(self, symbol: str) -> Optional[float]:
+        """Get current price for a symbol"""
+        try:
+            # Check cache first
+            cache_key = f"price:{symbol}"
+            cached_price = self.redis_client.get(cache_key)
+            if cached_price:
+                return float(cached_price)
+                
+            if self.alpaca:
+                # Get latest trade
+                trades = self.alpaca.get_latest_trade(symbol)
+                if trades:
+                    price = float(trades.price)
+                    # Cache for 1 minute
+                    self.redis_client.setex(cache_key, 60, str(price))
+                    return price
+            else:
+                # Mock price for testing
+                return 100.0
+                
+        except Exception as e:
+            self.logger.error("Error getting current price",
+                            symbol=symbol,
+                            error=str(e))
+            return None
+            
+    def _prepare_order(self, symbol: str, direction: str, shares: int,
+                      current_price: float, signal: Dict) -> Dict:
+        """Prepare order parameters"""
+        side = 'buy' if direction == 'BUY' else 'sell'
+        
+        if self.trading_config['use_limit_orders']:
+            # Use limit order with slight offset
+            offset = self.trading_config['limit_order_offset_pct'] / 100
+            if side == 'buy':
+                limit_price = current_price * (1 + offset)
+            else:
+                limit_price = current_price * (1 - offset)
+                
+            return {
+                'symbol': symbol,
+                'qty': shares,
+                'side': side,
+                'type': 'limit',
+                'limit_price': round(limit_price, 2),
+                'time_in_force': 'day',
+                'extended_hours': self._can_trade_extended_hours()
+            }
+        else:
+            # Use market order
+            return {
+                'symbol': symbol,
+                'qty': shares,
+                'side': side,
+                'type': 'market',
+                'time_in_force': 'day',
+                'extended_hours': self._can_trade_extended_hours()
+            }
+            
+    def _execute_order(self, order_params: Dict) -> Dict:
+        """Execute order through Alpaca"""
+        try:
+            if not self.alpaca:
+                # Mock execution for testing
+                return {
+                    'status': 'success',
+                    'order_id': f"MOCK_{order_params['symbol']}_{datetime.now().strftime('%Y%m%d%H%M%S')}",
+                    'fill_price': 100.0,
+                    'order': {'status': 'filled', 'filled_qty': order_params['qty']}
+                }
+                
+            # Submit order
+            order = self.alpaca.submit_order(**order_params)
+            
+            # Store pending order
+            self.pending_orders[order.id] = {
+                'symbol': order_params['symbol'],
+                'submitted_at': datetime.now(),
+                'order': order
+            }
+            
+            # Wait for fill or timeout
+            filled_order = self._wait_for_fill(order.id)
+            
+            if filled_order and filled_order.status == 'filled':
+                return {
+                    'status': 'success',
+                    'order_id': filled_order.id,
+                    'fill_price': float(filled_order.filled_avg_price),
+                    'order': filled_order
+                }
+            else:
+                # Cancel if not filled
+                self._cancel_order(order.id)
+                return {
+                    'status': 'failed',
+                    'reason': 'Order timeout or rejected',
+                    'order_status': filled_order.status if filled_order else 'unknown'
+                }
+                
+        except Exception as e:
+            self.logger.error("Error executing order", error=str(e))
+            return {
+                'status': 'error',
+                'reason': str(e)
+            }
+            
+    def _wait_for_fill(self, order_id: str, timeout: Optional[int] = None) -> Optional[Any]:
+        """Wait for order to be filled"""
+        if not self.alpaca:
+            return None
+            
+        timeout = timeout or self.trading_config['order_timeout_seconds']
+        start_time = time.time()
+        
+        while time.time() - start_time < timeout:
+            try:
+                order = self.alpaca.get_order(order_id)
+                if order.status in ['filled', 'partially_filled', 'cancelled', 'rejected']:
+                    return order
+                time.sleep(1)
+            except Exception as e:
+                self.logger.error("Error checking order status", error=str(e))
+                return None
+                
+        return None
+        
+    def _create_trade_record(self, signal: Dict, order: Any, order_params: Dict) -> Dict:
+        """Create trade record for database"""
+        return {
+            'trade_id': f"TRD_{signal['symbol']}_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+            'signal_id': signal.get('signal_id'),
+            'symbol': signal['symbol'],
+            'order_type': order_params['type'],
+            'side': signal.get('signal', signal.get('direction')),
+            'quantity': order_params['qty'],
+            'entry_price': float(order.filled_avg_price) if hasattr(order, 'filled_avg_price') else order_params.get('limit_price', 100.0),
+            'entry_timestamp': datetime.now(),
+            'entry_catalyst': signal.get('catalyst_type'),
+            'entry_news_id': signal.get('news_id'),
+            'catalyst_score_at_entry': signal.get('catalyst_score', 0)
+        }
+        
+    def _set_exit_orders(self, symbol: str, direction: str, entry_price: float,
+                        signal: Dict, trade_id: str):
+        """Set stop loss and take profit orders"""
+        try:
+            if not self.alpaca:
+                return
+                
+            # Get position
+            position = self.get_position_details(symbol)
+            if not position:
+                return
+                
+            qty = abs(position['quantity'])
+            side = 'sell' if direction == 'BUY' else 'buy'
+            
+            # Calculate stop loss
+            stop_loss = signal.get('stop_loss')
+            if not stop_loss:
+                stop_pct = self.trading_config['default_stop_loss_pct'] / 100
+                if direction == 'BUY':
+                    stop_loss = entry_price * (1 - stop_pct)
+                else:
+                    stop_loss = entry_price * (1 + stop_pct)
+                    
+            # Calculate take profit
+            take_profit = signal.get('target_1')  # Use first target
+            if not take_profit:
+                tp_pct = self.trading_config['default_take_profit_pct'] / 100
+                if direction == 'BUY':
+                    take_profit = entry_price * (1 + tp_pct)
+                else:
+                    take_profit = entry_price * (1 - tp_pct)
+                    
+            # Submit stop loss order
+            stop_order = self.alpaca.submit_order(
+                symbol=symbol,
+                qty=qty,
+                side=side,
+                type='stop',
+                stop_price=round(stop_loss, 2),
+                time_in_force='gtc'
+            )
+            
+            # Submit take profit order
+            tp_order = self.alpaca.submit_order(
+                symbol=symbol,
+                qty=qty,
+                side=side,
+                type='limit',
+                limit_price=round(take_profit, 2),
+                time_in_force='gtc'
+            )
+            
+            # Update database with exit orders
+            with get_db_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        UPDATE trade_records
+                        SET stop_loss = %s, take_profit = %s,
+                            stop_order_id = %s, tp_order_id = %s
+                        WHERE trade_id = %s
+                    """, [stop_loss, take_profit, stop_order.id, tp_order.id, trade_id])
+                    
+            self.logger.info("Exit orders set",
+                           symbol=symbol,
+                           stop_loss=stop_loss,
+                           take_profit=take_profit)
+                           
+        except Exception as e:
+            self.logger.error("Error setting exit orders",
+                            symbol=symbol,
+                            error=str(e))
+                            
+    def _cancel_open_orders(self, symbol: str):
+        """Cancel all open orders for a symbol"""
+        try:
+            if not self.alpaca:
+                return
+                
+            orders = self.alpaca.list_orders(status='open', symbols=symbol)
+            for order in orders:
+                self.alpaca.cancel_order(order.id)
+                self.logger.info("Cancelled order",
+                               order_id=order.id,
+                               symbol=symbol)
+                               
+        except Exception as e:
+            self.logger.error("Error cancelling orders",
+                            symbol=symbol,
+                            error=str(e))
+                            
+    def _cancel_stop_orders(self, symbol: str):
+        """Cancel stop orders for a symbol"""
+        try:
+            if not self.alpaca:
+                return
+                
+            orders = self.alpaca.list_orders(status='open', symbols=symbol)
+            for order in orders:
+                if order.order_type == 'stop':
+                    self.alpaca.cancel_order(order.id)
+                    
+        except Exception as e:
+            self.logger.error("Error cancelling stop orders",
+                            symbol=symbol,
+                            error=str(e))
+                            
+    def _cancel_order(self, order_id: str):
+        """Cancel a specific order"""
+        try:
+            if self.alpaca:
+                self.alpaca.cancel_order(order_id)
+        except Exception as e:
+            self.logger.error("Error cancelling order",
+                            order_id=order_id,
+                            error=str(e))
+                            
+    def _update_trade_exit(self, trade_id: str, exit_price: float,
+                          exit_reason: str, position: Dict):
+        """Update trade record with exit information"""
+        try:
+            entry_price = position['avg_entry_price']
+            quantity = abs(position['quantity'])
+            
+            # Calculate P&L
+            if position['side'] == 'long':
+                pnl_amount = (exit_price - entry_price) * quantity
+            else:
+                pnl_amount = (entry_price - exit_price) * quantity
+                
+            pnl_percentage = (pnl_amount / (entry_price * quantity)) * 100
+            
+            # Estimate commission
+            commission = quantity * self.trading_config['commission_per_share'] * 2  # Entry + exit
+            
+            exit_data = {
+                'exit_price': exit_price,
+                'exit_timestamp': datetime.now(),
+                'exit_reason': exit_reason,
+                'pnl_amount': pnl_amount,
+                'pnl_percentage': pnl_percentage,
+                'commission': commission,
+                'max_profit': position.get('max_profit', pnl_amount),
+                'max_loss': position.get('max_loss', pnl_amount if pnl_amount < 0 else 0)
+            }
+            
+            update_trade_exit(trade_id, exit_data)
+            
+        except Exception as e:
+            self.logger.error("Error updating trade exit",
+                            trade_id=trade_id,
+                            error=str(e))
+                            
+    def _get_db_position_data(self, symbol: str) -> Dict:
+        """Get position data from database"""
+        try:
+            with get_db_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        SELECT trade_id, signal_id, entry_timestamp,
+                               stop_loss, take_profit
+                        FROM trade_records
+                        WHERE symbol = %s AND exit_timestamp IS NULL
+                        ORDER BY entry_timestamp DESC
+                        LIMIT 1
+                    """, [symbol])
+                    
+                    result = cur.fetchone()
+                    if result:
+                        return dict(result)
+                    return {}
+                    
+        except Exception as e:
+            self.logger.error("Error getting DB position data",
+                            symbol=symbol,
+                            error=str(e))
+            return {}
+            
+    def _calculate_portfolio_risk(self) -> float:
+        """Calculate current portfolio risk percentage"""
+        try:
+            positions = self.get_current_positions()
+            if not positions:
+                return 0.0
+                
+            if self.alpaca:
+                account = self.alpaca.get_account()
+                portfolio_value = float(account.equity)
+            else:
+                portfolio_value = 100000  # Mock value
+                
+            total_risk = 0
+            for position in positions:
+                # Risk is position size * stop loss percentage
+                position_value = position['market_value']
+                position_pct = (position_value / portfolio_value) * 100
+                
+                # Assume 2% stop loss if not specified
+                stop_loss_pct = 2.0
+                if position.get('stop_loss'):
+                    current_price = position['current_price']
+                    stop_loss = position['stop_loss']
+                    if position['side'] == 'long':
+                        stop_loss_pct = ((current_price - stop_loss) / current_price) * 100
+                    else:
+                        stop_loss_pct = ((stop_loss - current_price) / current_price) * 100
+                        
+                position_risk = position_pct * (stop_loss_pct / 100)
+                total_risk += position_risk
+                
+            return total_risk
+            
+        except Exception as e:
+            self.logger.error("Error calculating portfolio risk", error=str(e))
+            return 0.0
+            
+    def _calculate_position_summary(self, positions: List[Dict]) -> Dict:
+        """Calculate summary statistics for positions"""
+        if not positions:
+            return {
+                'total_value': 0,
+                'total_pnl': 0,
+                'total_pnl_pct': 0,
+                'winning_positions': 0,
+                'losing_positions': 0
+            }
+            
+        total_value = sum(p['market_value'] for p in positions)
+        total_cost = sum(p['cost_basis'] for p in positions)
+        total_pnl = sum(p['unrealized_pnl'] for p in positions)
+        
+        winning = len([p for p in positions if p['unrealized_pnl'] > 0])
+        losing = len([p for p in positions if p['unrealized_pnl'] < 0])
+        
+        return {
+            'total_value': total_value,
+            'total_cost': total_cost,
+            'total_pnl': total_pnl,
+            'total_pnl_pct': (total_pnl / total_cost * 100) if total_cost > 0 else 0,
+            'winning_positions': winning,
+            'losing_positions': losing,
+            'average_pnl': total_pnl / len(positions) if positions else 0
+        }
+        
+    def _can_trade_extended_hours(self) -> bool:
+        """Check if we can trade in extended hours"""
+        now = datetime.now()
+        hour = now.hour
+        
+        # Regular hours: 9:30 AM - 4:00 PM EST
+        if 9.5 <= hour < 16:
+            return False
+            
+        # Pre-market: 4:00 AM - 9:30 AM EST
+        if 4 <= hour < 9.5:
+            return self.trading_config['allow_premarket']
+            
+        # After-hours: 4:00 PM - 8:00 PM EST
+        if 16 <= hour < 20:
+            return self.trading_config['allow_afterhours']
+            
+        return False
+        
+    def _check_alpaca_health(self) -> bool:
+        """Check if Alpaca API is healthy"""
+        try:
+            if self.alpaca:
+                account = self.alpaca.get_account()
+                return account.status == 'ACTIVE'
+            return False
+        except:
+            return False
+            
+    def start_position_monitor(self):
+        """Start background position monitoring"""
+        def monitor():
+            while True:
+                try:
+                    # Update position tracking
+                    positions = self.get_current_positions()
+                    
+                    for position in positions:
+                        # Check for trailing stops
+                        self._check_trailing_stop(position)
+                        
+                        # Update max profit/loss tracking
+                        self._update_position_extremes(position)
+                        
+                except Exception as e:
+                    self.logger.error("Position monitor error", error=str(e))
+                    
+                time.sleep(60)  # Check every minute
+                
+        import threading
+        thread = threading.Thread(target=monitor)
+        thread.daemon = True
+        thread.start()
+        
+    def start_order_monitor(self):
+        """Start background order monitoring"""
+        def monitor():
+            while True:
+                try:
+                    # Clean up old pending orders
+                    cutoff_time = datetime.now() - timedelta(minutes=5)
+                    
+                    for order_id, order_info in list(self.pending_orders.items()):
+                        if order_info['submitted_at'] < cutoff_time:
+                            # Check if order is still pending
+                            if self.alpaca:
+                                order = self.alpaca.get_order(order_id)
+                                if order.status in ['filled', 'cancelled', 'rejected']:
+                                    del self.pending_orders[order_id]
+                                    
+                except Exception as e:
+                    self.logger.error("Order monitor error", error=str(e))
+                    
+                time.sleep(30)  # Check every 30 seconds
+                
+        import threading
+        thread = threading.Thread(target=monitor)
+        thread.daemon = True
+        thread.start()
+        
+    def _check_trailing_stop(self, position: Dict):
+        """Check and update trailing stops"""
+        # Implementation for trailing stop logic
+        pass
+        
+    def _update_position_extremes(self, position: Dict):
+        """Update max profit/loss for a position"""
+        # Implementation for tracking position extremes
+        pass
+        
     def _register_with_coordination(self):
         """Register with coordination service"""
         try:
@@ -1059,27 +1267,30 @@ class CatalystAwarePaperTrading(DatabaseServiceMixin if USE_DB_UTILS else object
                 json={
                     'service_name': 'paper_trading',
                     'service_info': {
-                        'url': 'http://localhost:5005',
-                        'port': 5005,
-                        'version': '2.0.0',
-                        'capabilities': ['catalyst_aware', 'outcome_tracking']
+                        'url': f"http://trading-service:{self.port}",
+                        'port': self.port,
+                        'version': '2.1.0',
+                        'capabilities': ['paper_trading', 'position_management', 'risk_control']
                     }
-                }
+                },
+                timeout=5
             )
             if response.status_code == 200:
                 self.logger.info("Successfully registered with coordination service")
         except Exception as e:
-            self.logger.warning(f"Could not register with coordination: {e}")
+            self.logger.warning(f"Could not register with coordination", error=str(e))
             
     def run(self):
-        """Start the Flask application"""
-        self.logger.info("Starting Catalyst-Aware Paper Trading v2.0.0 on port 5005")
-        self.logger.info("Risk limits: Max 5 positions, 20% per position, 5% daily loss")
-        self.logger.info("Outcome tracking enabled for ML training")
+        """Start the trading service"""
+        self.logger.info("Starting Trading Service",
+                        version="2.1.0",
+                        port=self.port,
+                        environment=os.getenv('ENVIRONMENT', 'development'),
+                        alpaca_mode="paper" if self.alpaca else "mock")
         
-        self.app.run(host='0.0.0.0', port=5005, debug=False)
+        self.app.run(host='0.0.0.0', port=self.port, debug=False)
 
 
 if __name__ == "__main__":
-    service = CatalystAwarePaperTrading()
+    service = TradingService()
     service.run()
