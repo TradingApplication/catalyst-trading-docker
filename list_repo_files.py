@@ -1,8 +1,18 @@
 #!/usr/bin/env python3
 """
-Repository File Listing Tool with GitHub Raw URLs
-Lists all files and folders in the catalyst-trading-system repository with direct GitHub access URLs
+Name of Application: Catalyst Trading System
+Name of file: list_repo_files.py
+Version: 2.0.0
+Last Updated: 2025-07-01
+Purpose: Repository File Listing Tool with GitHub Raw URLs
 
+REVISION HISTORY:
+v2.0.0 (2025-07-01) - Updated for catalyst-trading-docker repository
+- Changed repository name from catalyst-trading-system to catalyst-trading-docker
+- Maintains all functionality for generating raw and web URLs
+
+Description of Service:
+Lists all files and folders in the catalyst-trading-docker repository with direct GitHub access URLs
 This script generates both:
 - Raw URLs (https://raw.githubusercontent.com/...) - for Claude/API access
 - Web URLs (https://github.com/...) - for human viewing in browser
@@ -15,7 +25,7 @@ from datetime import datetime
 
 # GitHub repository information
 GITHUB_USERNAME = "TradingApplication"  # GitHub organization/username
-REPO_NAME = "catalyst-trading-system"  # Repository name
+REPO_NAME = "catalyst-trading-docker"  # Repository name - UPDATED!
 BRANCH = "main"  # Branch name
 
 def path_to_github_url(filepath):
