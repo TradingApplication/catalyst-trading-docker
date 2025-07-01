@@ -4,10 +4,10 @@
 -- =============================================================================
 
 -- Create database if it doesn't exist (run manually on DigitalOcean)
--- CREATE DATABASE defaultdb;
+-- CREATE DATABASE catalyst_trading;
 
 -- Connect to the database
-\c defaultdb;
+\c catalyst_trading;
 
 -- Enable required extensions
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
@@ -15,7 +15,7 @@ CREATE EXTENSION IF NOT EXISTS "pg_stat_statements";
 CREATE EXTENSION IF NOT EXISTS "btree_gin";
 
 -- Set timezone for consistency
-SET timezone = 'Asia/Perth';
+SET timezone = 'UTC';
 
 -- =============================================================================
 -- NEWS & INTELLIGENCE TABLES
@@ -533,7 +533,7 @@ ALTER SYSTEM SET autovacuum_naptime = '1min';
 CREATE USER catalyst_app WITH PASSWORD 'secure_password_here';
 
 -- Grant necessary permissions
-GRANT CONNECT ON DATABASE defaultdb TO catalyst_app;
+GRANT CONNECT ON DATABASE catalyst_trading TO catalyst_app;
 GRANT USAGE ON SCHEMA public TO catalyst_app;
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO catalyst_app;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO catalyst_app;
@@ -657,7 +657,7 @@ COMMIT;
 -- =============================================================================
 
 \echo 'Catalyst Trading System database initialization completed successfully!'
-\echo 'Database: defaultdb'
+\echo 'Database: catalyst_trading'
 \echo 'Schema version: 2.0.0'
 \echo 'Tables created: 12'
 \echo 'Indexes created: 20+'

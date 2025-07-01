@@ -2,9 +2,8 @@ version: '3.8'
 
 services:
   # =============================================================================
-  # CATALYST TRADING SYSTEM - BUDGET DIGITALOCEAN DEPLOYMENT
+  # CATALYST TRADING SYSTEM v2.1.0 - PRODUCTION DEPLOYMENT
   # Budget: ~$40 USD/month (4GB Droplet + Managed DB)
-  # Personal Trading System - Optimized for Single User
   # =============================================================================
 
   # -----------------------------------------------------------------------------
@@ -19,6 +18,7 @@ services:
     volumes:
       - ./nginx.conf:/etc/nginx/nginx.conf:ro
       - nginx_logs:/var/log/nginx
+      - /etc/letsencrypt:/etc/letsencrypt:ro
     depends_on:
       - coordination-service
       - web-dashboard
@@ -36,7 +36,7 @@ services:
           memory: 64M
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost/health"]
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost/health"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -53,18 +53,11 @@ services:
     container_name: catalyst-coordination
     ports:
       - "5000:5000"
+    env_file:
+      - .env
     environment:
-      - PORT=5000
-      - SERVICE_NAME=coordination
-      - DATABASE_URL=${DATABASE_URL}
-      - REDIS_URL=redis://redis:6379
-      - NEWS_SERVICE_URL=http://news-service:5008
-      - SCANNER_SERVICE_URL=http://scanner-service:5001
-      - PATTERN_SERVICE_URL=http://pattern-service:5002
-      - TECHNICAL_SERVICE_URL=http://technical-service:5003
-      - TRADING_SERVICE_URL=http://trading-service:5005
-      - REPORTING_SERVICE_URL=http://reporting-service:5009
-      - LOG_LEVEL=INFO
+      - COORDINATION_SERVICE_PORT=5000
+      - SERVICE_NAME=coordination_service
     depends_on:
       - redis
     deploy:
@@ -75,12 +68,13 @@ services:
           memory: 128M
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:5000/health"]
       interval: 30s
       timeout: 10s
       retries: 3
     volumes:
       - coordination_logs:/app/logs
+      - ./data:/app/data
     networks:
       - catalyst-network
 
@@ -94,17 +88,14 @@ services:
     container_name: catalyst-news
     ports:
       - "5008:5008"
+    env_file:
+      - .env
     environment:
-      - PORT=5008
-      - SERVICE_NAME=news_collection
-      - DATABASE_URL=${DATABASE_URL}
-      - REDIS_URL=redis://redis:6379
-      - NEWSAPI_KEY=${NEWSAPI_KEY}
-      - ALPHAVANTAGE_KEY=${ALPHAVANTAGE_KEY}
-      - FINNHUB_KEY=${FINNHUB_KEY}
-      - LOG_LEVEL=INFO
+      - NEWS_SERVICE_PORT=5008
+      - SERVICE_NAME=news_service
     depends_on:
       - redis
+      - coordination-service
     deploy:
       resources:
         limits:
@@ -113,12 +104,13 @@ services:
           memory: 128M
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:5008/health"]
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:5008/health"]
       interval: 30s
       timeout: 10s
       retries: 3
     volumes:
       - news_logs:/app/logs
+      - ./data:/app/data
     networks:
       - catalyst-network
 
@@ -132,20 +124,18 @@ services:
     container_name: catalyst-scanner
     ports:
       - "5001:5001"
+    env_file:
+      - .env
     environment:
-      - PORT=5001
-      - SERVICE_NAME=security_scanner
-      - DATABASE_URL=${DATABASE_URL}
-      - REDIS_URL=redis://redis:6379
-      - NEWS_SERVICE_URL=http://news-service:5008
-      - COORDINATION_URL=http://coordination-service:5000
-      - LOG_LEVEL=INFO
+      - SCANNER_SERVICE_PORT=5001
+      - SERVICE_NAME=scanner_service
       # Memory optimization flags
       - PYTHONOPTIMIZE=1
       - MALLOC_TRIM_THRESHOLD_=100000
     depends_on:
       - redis
       - news-service
+      - coordination-service
     deploy:
       resources:
         limits:
@@ -154,12 +144,13 @@ services:
           memory: 256M
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:5001/health"]
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:5001/health"]
       interval: 30s
       timeout: 10s
       retries: 3
     volumes:
       - scanner_logs:/app/logs
+      - ./data:/app/data
     networks:
       - catalyst-network
 
@@ -169,22 +160,21 @@ services:
   pattern-service:
     build:
       context: .
-      dockerfile: Dockerfile.patterns
+      dockerfile: Dockerfile.pattern
     container_name: catalyst-patterns
     ports:
       - "5002:5002"
+    env_file:
+      - .env
     environment:
-      - PORT=5002
-      - SERVICE_NAME=pattern_analysis
-      - DATABASE_URL=${DATABASE_URL}
-      - REDIS_URL=redis://redis:6379
-      - COORDINATION_URL=http://coordination-service:5000
-      - LOG_LEVEL=INFO
+      - PATTERN_SERVICE_PORT=5002
+      - SERVICE_NAME=pattern_service
       # Memory optimization flags
       - PYTHONOPTIMIZE=1
       - MALLOC_TRIM_THRESHOLD_=100000
     depends_on:
       - redis
+      - coordination-service
     deploy:
       resources:
         limits:
@@ -193,12 +183,14 @@ services:
           memory: 256M
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:5002/health"]
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:5002/health"]
       interval: 30s
       timeout: 10s
       retries: 3
     volumes:
       - pattern_logs:/app/logs
+      - ./data:/app/data
+      - ./models:/app/models
     networks:
       - catalyst-network
 
@@ -212,18 +204,18 @@ services:
     container_name: catalyst-technical
     ports:
       - "5003:5003"
+    env_file:
+      - .env
     environment:
-      - PORT=5003
-      - SERVICE_NAME=technical_analysis
-      - DATABASE_URL=${DATABASE_URL}
-      - REDIS_URL=redis://redis:6379
-      - COORDINATION_URL=http://coordination-service:5000
-      - LOG_LEVEL=INFO
+      - TECHNICAL_SERVICE_PORT=5003
+      - SERVICE_NAME=technical_service
       # Memory optimization flags
       - PYTHONOPTIMIZE=1
       - MALLOC_TRIM_THRESHOLD_=100000
     depends_on:
       - redis
+      - coordination-service
+      - pattern-service
     deploy:
       resources:
         limits:
@@ -232,12 +224,14 @@ services:
           memory: 256M
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:5003/health"]
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:5003/health"]
       interval: 30s
       timeout: 10s
       retries: 3
     volumes:
       - technical_logs:/app/logs
+      - ./data:/app/data
+      - ./models:/app/models
     networks:
       - catalyst-network
 
@@ -251,21 +245,15 @@ services:
     container_name: catalyst-trading
     ports:
       - "5005:5005"
+    env_file:
+      - .env
     environment:
-      - PORT=5005
-      - SERVICE_NAME=paper_trading
-      - DATABASE_URL=${DATABASE_URL}
-      - REDIS_URL=redis://redis:6379
-      - ALPACA_API_KEY=${ALPACA_API_KEY}
-      - ALPACA_SECRET_KEY=${ALPACA_SECRET_KEY}
-      - ALPACA_BASE_URL=${ALPACA_BASE_URL:-https://paper-api.alpaca.markets}
-      - COORDINATION_URL=http://coordination-service:5000
-      - MAX_POSITIONS=${MAX_POSITIONS:-5}
-      - POSITION_SIZE_PCT=${POSITION_SIZE_PCT:-20}
-      - STOP_LOSS_PCT=${STOP_LOSS_PCT:-2}
-      - LOG_LEVEL=INFO
+      - TRADING_SERVICE_PORT=5005
+      - SERVICE_NAME=trading_service
     depends_on:
       - redis
+      - coordination-service
+      - technical-service
     deploy:
       resources:
         limits:
@@ -274,12 +262,13 @@ services:
           memory: 128M
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:5005/health"]
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:5005/health"]
       interval: 30s
       timeout: 10s
       retries: 3
     volumes:
       - trading_logs:/app/logs
+      - ./data:/app/data
     networks:
       - catalyst-network
 
@@ -293,15 +282,14 @@ services:
     container_name: catalyst-reporting
     ports:
       - "5009:5009"
+    env_file:
+      - .env
     environment:
-      - PORT=5009
-      - SERVICE_NAME=reporting
-      - DATABASE_URL=${DATABASE_URL}
-      - REDIS_URL=redis://redis:6379
-      - COORDINATION_URL=http://coordination-service:5000
-      - LOG_LEVEL=INFO
+      - REPORTING_SERVICE_PORT=5009
+      - SERVICE_NAME=reporting_service
     depends_on:
       - redis
+      - coordination-service
     deploy:
       resources:
         limits:
@@ -310,12 +298,13 @@ services:
           memory: 128M
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:5009/health"]
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:5009/health"]
       interval: 30s
       timeout: 10s
       retries: 3
     volumes:
       - reporting_logs:/app/logs
+      - ./reports:/app/reports
     networks:
       - catalyst-network
 
@@ -329,23 +318,16 @@ services:
     container_name: catalyst-dashboard
     ports:
       - "5010:5010"
+    env_file:
+      - .env
     environment:
-      - PORT=5010
-      - SERVICE_NAME=web_dashboard
-      - DATABASE_URL=${DATABASE_URL}
-      - REDIS_URL=redis://redis:6379
-      - COORDINATION_URL=http://coordination-service:5000
-      - NEWS_SERVICE_URL=http://news-service:5008
-      - SCANNER_SERVICE_URL=http://scanner-service:5001
-      - PATTERN_SERVICE_URL=http://pattern-service:5002
-      - TECHNICAL_SERVICE_URL=http://technical-service:5003
-      - TRADING_SERVICE_URL=http://trading-service:5005
-      - REPORTING_SERVICE_URL=http://reporting-service:5009
-      - LOG_LEVEL=INFO
+      - DASHBOARD_SERVICE_PORT=5010
+      - SERVICE_NAME=dashboard_service
       # Memory optimization for single user
       - MAX_WORKERS=2
     depends_on:
       - coordination-service
+      - reporting-service
       - redis
     deploy:
       resources:
@@ -355,7 +337,7 @@ services:
           memory: 256M
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:5010/health"]
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:5010/health"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -410,7 +392,7 @@ services:
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
       - '--storage.tsdb.path=/prometheus'
-      - '--storage.tsdb.retention.time=48h'  # Reduced retention for space
+      - '--storage.tsdb.retention.time=48h'
       - '--web.enable-lifecycle'
     deploy:
       resources:
@@ -450,27 +432,14 @@ networks:
         - subnet: 172.20.0.0/16
 
 # =============================================================================
-# BUDGET RESOURCE SUMMARY (4GB Droplet)
+# KEY CHANGES FROM PREVIOUS VERSION:
 # =============================================================================
-# Scanner Service:     512MB (reduced from 1GB)
-# Pattern Service:     512MB (reduced from 1GB)
-# Technical Service:   512MB (reduced from 1GB)
-# Dashboard Service:   512MB (reduced from 1GB)
-# Redis Cache:         512MB (reduced from 1GB)
-# Coordination:        256MB (reduced from 512MB)
-# News Collection:     256MB (reduced from 512MB)
-# Trading Service:     256MB (reduced from 512MB)
-# Reporting Service:   256MB (reduced from 512MB)
-# Prometheus:          256MB (reduced from 512MB)
-# Nginx:               128MB (reduced from 256MB)
-# =============================================================================
-# TOTAL ALLOCATED:     ~3.5GB (leaves ~500MB for OS and headroom)
-# =============================================================================
-# 
-# OPTIMIZATION NOTES:
-# - Redis configured with aggressive memory limits and LRU eviction
-# - Python services use PYTHONOPTIMIZE=1 to reduce memory
-# - Prometheus retention reduced to 48 hours
-# - All services have proper memory limits to prevent OOM
-# - Single user optimizations in dashboard (MAX_WORKERS=2)
+# 1. Fixed Dockerfile names (Dockerfile.pattern not .patterns)
+# 2. Added env_file: .env to all services for consistent configuration
+# 3. Corrected service environment variable names
+# 4. Added proper service dependencies
+# 5. Added volume mounts for data, models, and reports
+# 6. Changed healthcheck from curl to wget (more lightweight)
+# 7. Added SSL certificate mount for nginx
+# 8. Proper service naming that matches v2.1.0 architecture
 # =============================================================================
