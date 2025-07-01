@@ -24,7 +24,7 @@
 cd /opt/catalyst-trading-system
 
 # Clone your repository
-git clone https://github.com/TradingApplication/catalyst-trading-docker.git repo
+git remote -v
 
 # Or if you want to clone into current directory
 git clone https://github.com/TradingApplication/catalyst-trading-docker.git .

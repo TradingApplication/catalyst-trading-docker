@@ -1,0 +1,21 @@
+#To access Droplet via VSCode Terminal
+
+ssh -i ~/.ssh/digitalocean_catalyst root@68.183.177.11
+#NB You will need passphrase
+
+#To setup git to synchronize with Github
+cd /opt/catalyst-trading-system
+git init
+git remote add origin https://github.com/TradingApplication/catalyst-trading-docker.git
+
+
+#get changes from Github
+git pull origin main
+
+
+
+#connect to Github
+git clone https://github.com/TradingApplication/catalyst-trading-docker.git /opt/catalyst-trading-systemp
+
+#change to the directory that holds the codespace
+cd /opt/catalyst-trading-system
