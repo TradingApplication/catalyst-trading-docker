@@ -1,15 +1,14 @@
 # Name of Application: Catalyst Trading System
 # Name of file: Dockerfile.scanner
-# Version: 1.2.0
+# Version: 1.1.0
 # Last Updated: 2025-01-03
-# Purpose: Scanner service Docker container with enhanced TA-Lib installation
+# Purpose: Scanner service Docker container with fixed TA-Lib installation
 
 # REVISION HISTORY:
-# v1.2.0 (2025-01-03) - Enhanced TA-Lib installation fix
-# - Added pkg-config for better library detection
-# - Set explicit environment variables for TA-Lib
-# - Updated pip before installation
-# - Added build dependencies for numpy
+# v1.1.0 (2025-01-03) - Fixed TA-Lib installation issues
+# - Proper C library installation from source
+# - Separated TA-Lib Python wrapper installation
+# - Added library path configuration
 
 # Description of Service:
 # Container for the scanner service that performs dynamic security scanning
@@ -17,19 +16,16 @@
 
 FROM python:3.11-slim
 
-# Install system dependencies including pkg-config
+# Install system dependencies
 RUN apt-get update && apt-get install -y \
     build-essential \
     wget \
     curl \
     gcc \
-    g++ \
     make \
-    pkg-config \
-    python3-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Install TA-Lib C library
+# Install TA-Lib C library with proper paths
 RUN cd /tmp && \
     wget https://sourceforge.net/projects/ta-lib/files/ta-lib/0.4.0/ta-lib-0.4.0-src.tar.gz && \
     tar -xzf ta-lib-0.4.0-src.tar.gz && \
@@ -41,17 +37,8 @@ RUN cd /tmp && \
     rm -rf /tmp/ta-lib* && \
     ldconfig
 
-# Set environment variables for TA-Lib
+# Set library paths for TA-Lib
 ENV LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
-ENV C_INCLUDE_PATH=/usr/local/include:$C_INCLUDE_PATH
-ENV CPLUS_INCLUDE_PATH=/usr/local/include:$CPLUS_INCLUDE_PATH
-ENV PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:$PKG_CONFIG_PATH
-
-# Update pip and install build dependencies
-RUN pip install --upgrade pip setuptools wheel
-
-# Install numpy first (TA-Lib dependency)
-RUN pip install --no-cache-dir numpy
 
 # Set working directory
 WORKDIR /app
@@ -63,10 +50,8 @@ COPY requirements.txt .
 RUN grep -v "TA-Lib\|ta-lib\|talib" requirements.txt > requirements_no_talib.txt || cp requirements.txt requirements_no_talib.txt
 RUN pip install --no-cache-dir -r requirements_no_talib.txt
 
-# Now install TA-Lib Python wrapper with explicit library paths
-RUN LDFLAGS="-L/usr/local/lib" \
-    CFLAGS="-I/usr/local/include" \
-    pip install --no-cache-dir TA-Lib==0.4.28
+# Now install TA-Lib Python wrapper separately
+RUN pip install --no-cache-dir TA-Lib==0.4.28
 
 # Copy service files
 COPY scanner_service.py .
