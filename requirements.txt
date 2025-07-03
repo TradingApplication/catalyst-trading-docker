@@ -1,5 +1,5 @@
 # Catalyst Trading System - Complete Requirements
-# Version: 2.2.0 - Production Ready with Missing Packages
+# Version: 2.3.0 - Fixed urllib3 conflict
 
 # Core Web Framework
 flask==3.0.0
@@ -34,10 +34,10 @@ schedule==1.2.0
 beautifulsoup4==4.12.2
 lxml==4.9.3
 
-# News Processing (MISSING - ADDED)
+# News Processing
 feedparser==6.0.11
 
-# Logging (MISSING - ADDED)
+# Logging
 structlog==24.1.0
 
 # Monitoring
@@ -52,8 +52,8 @@ python-dateutil==2.8.2
 pytz==2023.3
 loguru==0.7.2
 
-# Additional dependencies that might be needed
-urllib3==2.1.0
+# Additional dependencies - Fixed urllib3 version
+urllib3==1.26.18
 certifi==2023.11.17
 charset-normalizer==3.3.2
 idna==3.6
