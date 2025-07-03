@@ -1,7 +1,7 @@
 GitHub Repository URLs for Direct Access
 Repository: TradingApplication/catalyst-trading-docker
 Branch: main
-Generated: 2025-07-01 23:42:25
+Generated: 2025-07-03 02:38:58
 ================================================================================
 
 RAW URLS (for Claude/API access):
@@ -149,6 +149,9 @@ https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/mai
 
 requirements.txt
 https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/main/requirements.txt
+
+requirements.txt.original
+https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/main/requirements.txt.original
 
 scanner_service.py
 https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/main/scanner_service.py

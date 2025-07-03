@@ -2,12 +2,13 @@
 
 **Repository:** [TradingApplication/catalyst-trading-docker](https://github.com/TradingApplication/catalyst-trading-docker)
 **Branch:** main
-**Generated:** 2025-07-01 23:42:25
+**Generated:** 2025-07-03 02:38:58
 
 ## Key Configuration Files
 
 - [docker-compose.yml](https://github.com/TradingApplication/catalyst-trading-docker/blob/main/docker-compose.yml) ([raw](https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/main/docker-compose.yml))
 - [requirements.txt](https://github.com/TradingApplication/catalyst-trading-docker/blob/main/requirements.txt) ([raw](https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/main/requirements.txt))
+- [requirements.txt.original](https://github.com/TradingApplication/catalyst-trading-docker/blob/main/requirements.txt.original) ([raw](https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/main/requirements.txt.original))
 - [nginx/ssl/nginx.conf](https://github.com/TradingApplication/catalyst-trading-docker/blob/main/nginx/ssl/nginx.conf) ([raw](https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/main/nginx/ssl/nginx.conf))
 - [monitoring/prometheus.yml](https://github.com/TradingApplication/catalyst-trading-docker/blob/main/monitoring/prometheus.yml) ([raw](https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/main/monitoring/prometheus.yml))
 - [prometheus.yml](https://github.com/TradingApplication/catalyst-trading-docker/blob/main/prometheus.yml) ([raw](https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/main/prometheus.yml))
@@ -108,3 +109,4 @@
 
 - [Docs/Access - Git - DigitalOcean](https://github.com/TradingApplication/catalyst-trading-docker/blob/main/Docs/Access - Git - DigitalOcean) ([raw](https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/main/Docs/Access - Git - DigitalOcean))
 - [news_service_.v200py](https://github.com/TradingApplication/catalyst-trading-docker/blob/main/news_service_.v200py) ([raw](https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/main/news_service_.v200py))
+- [requirements.txt.original](https://github.com/TradingApplication/catalyst-trading-docker/blob/main/requirements.txt.original) ([raw](https://raw.githubusercontent.com/TradingApplication/catalyst-trading-docker/main/requirements.txt.original))
