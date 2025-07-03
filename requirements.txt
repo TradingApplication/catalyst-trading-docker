@@ -1,5 +1,5 @@
 # Catalyst Trading System - Complete Requirements
-# Version: 2.3.0 - Fixed urllib3 conflict
+# Version: 2.4.0 - Flexible dependency resolution
 
 # Core Web Framework
 flask==3.0.0
@@ -52,8 +52,6 @@ python-dateutil==2.8.2
 pytz==2023.3
 loguru==0.7.2
 
-# Additional dependencies - Fixed urllib3 version
-urllib3==1.26.18
-certifi==2023.11.17
-charset-normalizer==3.3.2
-idna==3.6
+# Let pip resolve these automatically
+# urllib3, certifi, charset-normalizer, idna will be installed 
+# as dependencies of other packages with compatible versions

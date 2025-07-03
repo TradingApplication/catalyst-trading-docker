@@ -22,5 +22,24 @@ git push origin main
 #connect to Github
 git clone https://github.com/TradingApplication/catalyst-trading-docker.git /opt/catalyst-trading-systemp
 
-#change to the directory that holds the codespace
-cd /opt/catalyst-trading-system
+Complete Nuclear Sync Process:
+bash# 1. First, commit and push ALL your local changes
+git add -A
+git commit -m "Fix all issues - urllib3, dashboard werkzeug, dockerfiles"
+git push origin main
+
+# 2. On the droplet, pull everything fresh
+cd /opt/catalyst-trading-docker
+git fetch --all
+git reset --hard origin/main
+git pull origin main
+
+# 3. Stop and remove everything
+docker-compose -f docker-compose.yml down -v
+docker system prune -a -f --volumes
+
+# 4. Rebuild EVERYTHING from scratch
+docker-compose -f docker-compose.yml build --no-cache --pull
+
+# 5. Start fresh
+docker-compose -f docker-compose.yml up -d
