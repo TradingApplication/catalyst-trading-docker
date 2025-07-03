@@ -12,7 +12,7 @@ redis==5.0.1
 
 # API Clients
 requests==2.31.0
-alpaca-py==0.13.3
+alpaca-trade-api==3.0.2
 websocket-client==1.6.4
 
 # Data Processing

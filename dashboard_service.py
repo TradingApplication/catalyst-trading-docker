@@ -1144,7 +1144,7 @@ class DashboardService:
         self._start_real_time_updates()
         
         try:
-            self.socketio.run(self.app, host='0.0.0.0', port=self.port, debug=False)
+            self.socketio.run(self.app, host='0.0.0.0', port=self.port, debug=False, allow_unsafe_werkzeug=True)
         finally:
             self._stop_real_time_updates()
 
