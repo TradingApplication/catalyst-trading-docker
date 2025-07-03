@@ -71,7 +71,7 @@ COPY security-scanner-v200.py ./scanner_service.py
 COPY database_utils.py ./database_utils.py
 
 # Copy configuration files
-COPY config/ ./config/
+# COPY config/ ./config/
 
 # Create market data cache directory
 RUN mkdir -p /app/cache/market_data && \

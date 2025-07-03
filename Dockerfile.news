@@ -70,7 +70,7 @@ COPY news-service-v200.py ./news_service.py
 COPY database_utils.py ./database_utils.py
 
 # Copy configuration files
-COPY config/ ./config/
+# COPY config/ ./config/
 
 # Create RSS feed cache directory
 RUN mkdir -p /app/cache/rss && \
