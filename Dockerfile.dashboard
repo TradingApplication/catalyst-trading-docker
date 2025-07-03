@@ -1,52 +1,40 @@
-# Dockerfile for Web Dashboard Service
-# This service provides real-time monitoring interface with WebSocket support
-FROM python:3.10-slim
+FROM python:3.11-slim
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
-    gcc \
-    postgresql-client \
+    build-essential \
+    wget \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Set working directory
+# Set working directory in container
 WORKDIR /app
 
-# Copy requirements file
+# Copy requirements first (for better Docker caching)
 COPY requirements.txt .
 
-# Install Python dependencies
+# Install Python packages
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Create directories for static files and templates
-RUN mkdir -p static templates
-
-# Create non-root user for security
-RUN useradd -m -u 1000 trading && \
-    chown -R trading:trading /app
-
-# Copy application code
+# Copy service file
 COPY dashboard_service.py .
+
+# Copy database utilities
 COPY database_utils.py .
-# Copy static and template files if they exist
-COPY static/* static/ 2>/dev/null || :
-COPY templates/* templates/ 2>/dev/null || :
 
-# Switch to non-root user
-USER trading
+# Create necessary directories
+RUN mkdir -p /app/logs /app/data /app/models /app/reports
 
-# Set environment variables
-ENV PORT=5010
-ENV SERVICE_NAME=web_dashboard
-ENV PYTHONPATH=/app
+# Environment variables
 ENV PYTHONUNBUFFERED=1
-
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:${PORT}/health || exit 1
+ENV SERVICE_NAME=dashboard_service
 
 # Expose port
 EXPOSE 5010
 
-# Run the service with gunicorn for production with eventlet worker for WebSocket support
-CMD ["gunicorn", "--bind", "0.0.0.0:5010", "--worker-class", "eventlet", "--workers", "1", "--timeout", "120", "dashboard_service:app"]
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+    CMD wget --no-verbose --tries=1 --spider http://localhost:5010/health || exit 1
+
+# Run service
+CMD ["python", "dashboard_service.py"]
