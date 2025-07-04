@@ -13,11 +13,13 @@ git remote add origin https://github.com/TradingApplication/catalyst-trading-doc
 git pull origin main
 
 # In VSCode terminal adding files missing in updates
-git add FILENAME
+#git add FILENAME
 git add Dockerfile.scanner
 git commit -m "Update Dockerfile.scanner to v1.3.0"
 git push origin main
 
+#.ENV has special requirements
+scp -i ~/.ssh/your-key.pem .env root@YOUR-DROPLET-IP:/opt/catalyst-trading-docker/
 
 #connect to Github
 git clone https://github.com/TradingApplication/catalyst-trading-docker.git /opt/catalyst-trading-systemp

@@ -1,0 +1,40 @@
+
+
+#Clear Docker Build caches
+docker builder prune -a
+
+
+
+
+# Remove all Docker cache, images, and build cache
+docker system prune -a --volumes -f
+
+# Clear builder cache specifically
+docker builder prune -a -f
+
+# Now build with no cache
+docker-compose build --no-cache --pull
+
+
+# Staring System
+docker-compose up -d
+
+# Staring some of System Services
+docker-compose up -d scanner-service pattern-service technical-service
+
+# Stop all containers
+docker-compose down
+
+# ===============================================
+# Testing
+# ===============================================
+
+# Check the logs for a service that's restarting
+docker-compose logs news-service | tail -50
+
+# Or check coordination service (it's usually a good indicator)
+docker-compose logs coordination-service | tail -50
+
+# Check Redis and Postgres specifically
+docker-compose logs redis | tail -20
+docker-compose logs postgres | tail -20
