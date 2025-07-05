@@ -2,19 +2,11 @@
 """
 Name of Application: Catalyst Trading System
 Name of file: database_utils.py
-Version: 2.3.1
-Last Updated: 2025-07-05
+Version: 2.3.0
+Last Updated: 2025-07-04
 Purpose: Centralized database connection management for all services
 
 REVISION HISTORY:
-v2.3.1 (2025-07-05) - Added remaining missing functions for all services
-- Added get_recent_news() for news service
-- Added insert_pattern_detection() as alias for pattern service
-- Added insert_trade_record() for trading service
-- Added update_trade_exit() for trading service  
-- Added get_open_positions() for trading service
-- Fixed connection context manager issue
-
 v2.3.0 (2025-07-04) - Added missing functions for coordination service
 - Added create_trading_cycle() and update_trading_cycle()
 - Added log_workflow_step() and update_workflow_step()
@@ -167,13 +159,25 @@ def init_redis_client() -> redis.Redis:
                 return None
 
 
+@contextmanager
 def get_db_connection():
-    """Get a database connection from the pool"""
+    """Get a database connection from the pool with automatic cleanup"""
+    conn = None
     pool = init_db_pool()
-    conn = pool.getconn()
-    conn.set_session(autocommit=False)
-    conn.cursor_factory = RealDictCursor
-    return conn
+    
+    try:
+        conn = pool.getconn()
+        conn.set_session(autocommit=False)
+        conn.cursor_factory = RealDictCursor
+        yield conn
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        logger.error("Database operation failed", error=str(e))
+        raise
+    finally:
+        if conn and _db_pool:
+            _db_pool.putconn(conn)
 
 
 def get_redis() -> redis.Redis:
@@ -206,25 +210,20 @@ def health_check() -> Dict[str, Any]:
     }
     
     # Check PostgreSQL
-    conn = None
     try:
-        conn = get_db_connection()
-        with conn.cursor() as cur:
-            cur.execute("SELECT 1")
-            health_status['postgresql']['status'] = 'healthy'
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1")
+                health_status['postgresql']['status'] = 'healthy'
     except Exception as e:
         health_status['postgresql']['status'] = 'unhealthy'
         health_status['postgresql']['error'] = str(e)
-    finally:
-        if conn and _db_pool:
-            _db_pool.putconn(conn)
     
     # Check Redis
     try:
         redis_client = get_redis()
-        if redis_client:
-            redis_client.ping()
-            health_status['redis']['status'] = 'healthy'
+        redis_client.ping()
+        health_status['redis']['status'] = 'healthy'
     except Exception as e:
         health_status['redis']['status'] = 'unhealthy'
         health_status['redis']['error'] = str(e)
@@ -283,8 +282,8 @@ def create_trading_cycle(mode: str = 'normal', metadata: Dict = None) -> str:
         logger.error(f"Failed to create trading cycle: {e}")
         raise
     finally:
-        if conn and _db_pool:
-            _db_pool.putconn(conn)
+        if conn:
+            conn.close()
 
 def update_trading_cycle(cycle_id: str, updates: Dict) -> bool:
     """Update trading cycle with metrics"""
@@ -321,8 +320,8 @@ def update_trading_cycle(cycle_id: str, updates: Dict) -> bool:
         logger.error(f"Failed to update trading cycle: {e}")
         return False
     finally:
-        if conn and _db_pool:
-            _db_pool.putconn(conn)
+        if conn:
+            conn.close()
 
 # =============================================================================
 # WORKFLOW LOGGING FUNCTIONS (Added in v2.3.0)
@@ -358,8 +357,8 @@ def log_workflow_step(cycle_id: str, step_name: str, status: str,
         logger.error(f"Failed to log workflow step: {e}")
         return 0
     finally:
-        if conn and _db_pool:
-            _db_pool.putconn(conn)
+        if conn:
+            conn.close()
 
 def update_workflow_step(workflow_id: int, status: str, 
                         records_processed: int = None,
@@ -400,8 +399,8 @@ def update_workflow_step(workflow_id: int, status: str,
             conn.rollback()
         logger.error(f"Failed to update workflow step: {e}")
     finally:
-        if conn and _db_pool:
-            _db_pool.putconn(conn)
+        if conn:
+            conn.close()
 
 # =============================================================================
 # SERVICE HEALTH FUNCTIONS (Added in v2.3.0)
@@ -431,8 +430,8 @@ def update_service_health(service_name: str, status: str,
             conn.rollback()
         logger.error(f"Failed to update service health: {e}")
     finally:
-        if conn and _db_pool:
-            _db_pool.putconn(conn)
+        if conn:
+            conn.close()
 
 # =============================================================================
 # CONFIGURATION FUNCTIONS (Added in v2.3.0)
@@ -462,8 +461,8 @@ def get_configuration(key: str = None, category: str = None) -> Any:
         logger.error(f"Failed to get configuration: {e}")
         return None
     finally:
-        if conn and _db_pool:
-            _db_pool.putconn(conn)
+        if conn:
+            conn.close()
 
 def set_configuration(key: str, value: Any, data_type: str = 'string',
                      category: str = None, description: str = None):
@@ -487,8 +486,8 @@ def set_configuration(key: str, value: Any, data_type: str = 'string',
             conn.rollback()
         logger.error(f"Failed to set configuration: {e}")
     finally:
-        if conn and _db_pool:
-            _db_pool.putconn(conn)
+        if conn:
+            conn.close()
 
 def _cast_config_value(value: str, data_type: str) -> Any:
     """Cast configuration value to appropriate type"""
@@ -553,28 +552,8 @@ def insert_news_article(article_data: Dict) -> int:
         logger.error(f"Failed to insert news article: {e}")
         return 0
     finally:
-        if conn and _db_pool:
-            _db_pool.putconn(conn)
-
-def get_recent_news(hours: int = 24, limit: int = 100) -> List[Dict]:
-    """Get recent news articles from database (Added in v2.3.1)"""
-    conn = None
-    try:
-        conn = get_db_connection()
-        with conn.cursor() as cur:
-            cur.execute("""
-                SELECT * FROM news_raw 
-                WHERE collected_timestamp > NOW() - INTERVAL '%s hours'
-                ORDER BY collected_timestamp DESC
-                LIMIT %s
-            """, (hours, limit))
-            return cur.fetchall() or []
-    except Exception as e:
-        logger.error(f"Failed to get recent news: {e}")
-        return []
-    finally:
-        if conn and _db_pool:
-            _db_pool.putconn(conn)
+        if conn:
+            conn.close()
 
 # =============================================================================
 # TRADING FUNCTIONS (Added in v2.3.0)
@@ -620,8 +599,8 @@ def insert_trading_signal(signal_data: Dict) -> int:
         logger.error(f"Failed to insert trading signal: {e}")
         return 0
     finally:
-        if conn and _db_pool:
-            _db_pool.putconn(conn)
+        if conn:
+            conn.close()
 
 def get_pending_signals() -> List[Dict]:
     """Get pending trading signals"""
@@ -635,115 +614,13 @@ def get_pending_signals() -> List[Dict]:
                 AND signal_timestamp > NOW() - INTERVAL '1 hour'
                 ORDER BY confidence_score DESC
             """)
-            return cur.fetchall() or []
+            return cur.fetchall()
     except Exception as e:
         logger.error(f"Failed to get pending signals: {e}")
         return []
     finally:
-        if conn and _db_pool:
-            _db_pool.putconn(conn)
-
-def insert_trade_record(trade_data: Dict) -> int:
-    """Insert a new trade record (Added in v2.3.1)"""
-    conn = None
-    try:
-        conn = get_db_connection()
-        with conn.cursor() as cur:
-            cur.execute("""
-                INSERT INTO trade_records (
-                    symbol, entry_timestamp, entry_price, position_size,
-                    stop_loss, take_profit, entry_reason, signal_id,
-                    pattern_id, news_id, confidence_score, metadata
-                ) VALUES (
-                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
-                ) RETURNING id
-            """, (
-                trade_data.get('symbol'),
-                trade_data.get('entry_timestamp', datetime.utcnow()),
-                trade_data.get('entry_price'),
-                trade_data.get('position_size'),
-                trade_data.get('stop_loss'),
-                trade_data.get('take_profit'),
-                trade_data.get('entry_reason'),
-                trade_data.get('signal_id'),
-                trade_data.get('pattern_id'),
-                trade_data.get('news_id'),
-                trade_data.get('confidence_score'),
-                json.dumps(trade_data.get('metadata', {}))
-            ))
-            
-            conn.commit()
-            row = cur.fetchone()
-            return row['id'] if row else 0
-    except Exception as e:
         if conn:
-            conn.rollback()
-        logger.error(f"Failed to insert trade record: {e}")
-        return 0
-    finally:
-        if conn and _db_pool:
-            _db_pool.putconn(conn)
-
-def update_trade_exit(trade_id: int, exit_data: Dict) -> bool:
-    """Update trade record with exit information (Added in v2.3.1)"""
-    conn = None
-    try:
-        conn = get_db_connection()
-        with conn.cursor() as cur:
-            cur.execute("""
-                UPDATE trade_records 
-                SET exit_timestamp = %s, 
-                    exit_price = %s,
-                    exit_reason = %s,
-                    pnl_amount = %s,
-                    pnl_percentage = %s,
-                    commission = %s,
-                    trade_duration = %s,
-                    max_profit = %s,
-                    max_loss = %s
-                WHERE id = %s
-            """, (
-                exit_data.get('exit_timestamp', datetime.utcnow()),
-                exit_data.get('exit_price'),
-                exit_data.get('exit_reason'),
-                exit_data.get('pnl_amount'),
-                exit_data.get('pnl_percentage'),
-                exit_data.get('commission', 0),
-                exit_data.get('trade_duration'),
-                exit_data.get('max_profit'),
-                exit_data.get('max_loss'),
-                trade_id
-            ))
-            
-            conn.commit()
-            return cur.rowcount > 0
-    except Exception as e:
-        if conn:
-            conn.rollback()
-        logger.error(f"Failed to update trade exit: {e}")
-        return False
-    finally:
-        if conn and _db_pool:
-            _db_pool.putconn(conn)
-
-def get_open_positions() -> List[Dict]:
-    """Get all open trading positions (Added in v2.3.1)"""
-    conn = None
-    try:
-        conn = get_db_connection()
-        with conn.cursor() as cur:
-            cur.execute("""
-                SELECT * FROM trade_records 
-                WHERE exit_timestamp IS NULL 
-                ORDER BY entry_timestamp DESC
-            """)
-            return cur.fetchall() or []
-    except Exception as e:
-        logger.error(f"Failed to get open positions: {e}")
-        return []
-    finally:
-        if conn and _db_pool:
-            _db_pool.putconn(conn)
+            conn.close()
 
 # =============================================================================
 # PATTERN ANALYSIS FUNCTIONS (Added in v2.3.0)
@@ -789,12 +666,8 @@ def insert_pattern_analysis(pattern_data: Dict) -> int:
         logger.error(f"Failed to insert pattern analysis: {e}")
         return 0
     finally:
-        if conn and _db_pool:
-            _db_pool.putconn(conn)
-
-def insert_pattern_detection(pattern_data: Dict) -> int:
-    """Insert pattern detection result - alias for insert_pattern_analysis (Added in v2.3.1)"""
-    return insert_pattern_analysis(pattern_data)
+        if conn:
+            conn.close()
 
 # =============================================================================
 # TECHNICAL INDICATORS FUNCTIONS (Added in v2.3.0)
@@ -847,8 +720,8 @@ def insert_technical_indicators(indicator_data: Dict) -> int:
         logger.error(f"Failed to insert technical indicators: {e}")
         return 0
     finally:
-        if conn and _db_pool:
-            _db_pool.putconn(conn)
+        if conn:
+            conn.close()
 
 # =============================================================================
 # Initialize default configuration if needed
