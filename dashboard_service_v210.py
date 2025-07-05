@@ -2,16 +2,11 @@
 """
 Name of Application: Catalyst Trading System
 Name of file: dashboard_service.py
-Version: 2.1.1
-Last Updated: 2025-01-05
+Version: 2.1.0
+Last Updated: 2025-07-01
 Purpose: Web dashboard service for real-time monitoring and system management
 
 REVISION HISTORY:
-v2.1.1 (2025-01-05) - Fixed Docker networking issues
-- Added automatic Docker environment detection
-- Corrected service URL resolution for container networking
-- Fixed service-to-service communication within Docker
-
 v2.1.0 (2025-07-01) - Initial implementation for production deployment
 - Real-time WebSocket dashboard for system monitoring
 - Trading performance visualization and analytics
@@ -115,17 +110,18 @@ class DashboardService:
         # Service configuration
         self.service_name = "dashboard_service"
         self.port = int(os.getenv('DASHBOARD_SERVICE_PORT', 5010))
+        self.coordination_url = os.getenv('COORDINATION_URL', 'http://coordination-service:5000')
         
-        # Detect if running in Docker
-        self.is_docker = os.path.exists('/.dockerenv') or os.getenv('DOCKER_CONTAINER', False)
-        
-        # Get correct service URLs based on environment
-        self.service_urls = self._get_service_urls()
-        self.coordination_url = self.service_urls['coordination']
-        
-        logger.info("Service URLs configured", 
-                   is_docker=self.is_docker,
-                   urls=self.service_urls)
+        # Service URLs
+        self.service_urls = {
+            'coordination': os.getenv('COORDINATION_URL', 'http://coordination-service:5000'),
+            'scanner': os.getenv('SCANNER_SERVICE_URL', 'http://scanner-service:5001'),
+            'pattern': os.getenv('PATTERN_SERVICE_URL', 'http://pattern-service:5002'),
+            'technical': os.getenv('TECHNICAL_SERVICE_URL', 'http://technical-service:5003'),
+            'trading': os.getenv('TRADING_SERVICE_URL', 'http://trading-service:5005'),
+            'news': os.getenv('NEWS_SERVICE_URL', 'http://news-service:5008'),
+            'reporting': os.getenv('REPORTING_SERVICE_URL', 'http://reporting-service:5009')
+        }
         
         # Database connections
         self.redis_client = get_redis_connection()
@@ -140,39 +136,7 @@ class DashboardService:
         self._setup_websocket_handlers()
         self._register_with_coordinator()
         
-        logger.info("Dashboard Service initialized", 
-                   port=self.port,
-                   environment="docker" if self.is_docker else "local")
-
-    def _get_service_urls(self) -> Dict[str, str]:
-        """
-        Get appropriate service URLs based on environment.
-        Automatically detects Docker environment and returns correct URLs.
-        """
-        if self.is_docker:
-            # Running inside Docker - use service names from docker-compose.yml
-            logger.info("Running in Docker - using Docker service names")
-            return {
-                'coordination': 'http://coordination-service:5000',
-                'scanner': 'http://scanner-service:5001',
-                'pattern': 'http://pattern-service:5002',
-                'technical': 'http://technical-service:5003',
-                'trading': 'http://trading-service:5005',
-                'news': 'http://news-service:5008',
-                'reporting': 'http://reporting-service:5009'
-            }
-        else:
-            # Running locally - use environment variables or localhost
-            logger.info("Running locally - using environment variables or localhost")
-            return {
-                'coordination': os.getenv('COORDINATION_URL', 'http://localhost:5000'),
-                'scanner': os.getenv('SCANNER_SERVICE_URL', 'http://localhost:5001'),
-                'pattern': os.getenv('PATTERN_SERVICE_URL', 'http://localhost:5002'),
-                'technical': os.getenv('TECHNICAL_SERVICE_URL', 'http://localhost:5003'),
-                'trading': os.getenv('TRADING_SERVICE_URL', 'http://localhost:5005'),
-                'news': os.getenv('NEWS_SERVICE_URL', 'http://localhost:5008'),
-                'reporting': os.getenv('REPORTING_SERVICE_URL', 'http://localhost:5009')
-            }
+        logger.info("Dashboard Service initialized", port=self.port)
 
     def _setup_routes(self):
         """Setup Flask routes"""
@@ -196,8 +160,7 @@ class DashboardService:
                     'database': 'healthy',
                     'redis': redis_status,
                     'websocket': 'active' if self.is_running else 'inactive',
-                    'version': '2.1.1',
-                    'environment': 'docker' if self.is_docker else 'local'
+                    'version': '2.1.0'
                 }), 200
                 
             except Exception as e:
@@ -407,7 +370,6 @@ class DashboardService:
         
         for service_name, url in self.service_urls.items():
             try:
-                logger.debug(f"Checking health for {service_name} at {url}/health")
                 response = requests.get(f"{url}/health", timeout=3)
                 if response.status_code == 200:
                     health_data = response.json()
@@ -424,10 +386,6 @@ class DashboardService:
                         'error': f"HTTP {response.status_code}"
                     }
             except Exception as e:
-                logger.warning(f"Health check failed for {service_name}", 
-                             service=service_name, 
-                             url=url,
-                             error=str(e))
                 service_health[service_name] = {
                     'status': 'unreachable',
                     'last_check': datetime.now(timezone.utc).isoformat(),
@@ -1180,9 +1138,7 @@ class DashboardService:
 
     def run(self):
         """Run the Flask application with SocketIO"""
-        logger.info("Starting Dashboard Service", 
-                   port=self.port,
-                   environment="docker" if self.is_docker else "local")
+        logger.info("Starting Dashboard Service", port=self.port)
         
         # Start real-time updates
         self._start_real_time_updates()
