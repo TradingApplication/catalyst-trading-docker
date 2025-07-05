@@ -479,3 +479,7 @@ class CatalystAwarePatternAnalysis:
         
         pattern_detected = False
         pattern
+
+if __name__ == "__main__":
+    service = CatalystAwarePatternAnalysis()
+    service.run()
