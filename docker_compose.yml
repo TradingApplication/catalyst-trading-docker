@@ -59,6 +59,8 @@ services:
       - "5000:5000"
     env_file:
       - .env
+    environment:
+      - TZ=America/New_York  # Add this line
     depends_on:
       - redis
       - postgres
