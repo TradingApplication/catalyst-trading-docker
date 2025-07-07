@@ -19,7 +19,7 @@ git commit -m "Update Dockerfile.scanner to v1.3.0"
 git push origin main
 
 #.ENV has special requirements
-scp -i ~/.ssh/your-key.pem .env root@YOUR-DROPLET-IP:/opt/catalyst-trading-docker/
+scp -i ~/.ssh/your-key.pem .env root@YOUR-DROPLET-IP:/opt/catalyst-tradin   g-docker/
 
 #connect to Github
 git clone https://github.com/TradingApplication/catalyst-trading-docker.git /opt/catalyst-trading-systemp
