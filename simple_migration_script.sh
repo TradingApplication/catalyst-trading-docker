@@ -15,9 +15,9 @@
 
 # Database connection details
 DB_HOST="${DB_HOST:-localhost}"
-DB_PORT="${DB_PORT:-5432}"
+DB_PORT="${DB_PORT:-25060}"
 DB_NAME="${DB_NAME:-catalyst_trading}"
-DB_USER="${DB_USER:-catalyst_user}"
+DB_USER="${DB_USER:-doadmin}"
 
 echo "=================================================="
 echo "Catalyst Trading System - Enhanced Schema Migration"
