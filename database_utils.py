@@ -204,7 +204,7 @@ def close_connections():
 def health_check() -> Dict[str, Any]:
     """Perform health check on database connections"""
     health_status = {
-        'postgresql': {'status': 'unknown', 'error': None},
+        'database': {'status': 'unknown', 'error': None},
         'redis': {'status': 'unknown', 'error': None}
     }
     
@@ -214,10 +214,10 @@ def health_check() -> Dict[str, Any]:
         conn = get_db_connection()
         with conn.cursor() as cur:
             cur.execute("SELECT 1")
-            health_status['postgresql']['status'] = 'healthy'
+            health_status['database']['status'] = 'healthy'
     except Exception as e:
-        health_status['postgresql']['status'] = 'unhealthy'
-        health_status['postgresql']['error'] = str(e)
+        health_status['database']['status'] = 'unhealthy'
+        health_status['database']['error'] = str(e)
     finally:
         if conn and _db_pool:
             _db_pool.putconn(conn)
