@@ -2,11 +2,17 @@
 """
 Name of Application: Catalyst Trading System
 Name of file: technical_service.py
-Version: 2.1.1
+Version: 2.1.2
 Last Updated: 2025-07-07
 Purpose: Technical analysis and signal generation with catalyst awareness
 
 REVISION HISTORY:
+v2.1.2 (2025-07-07) - Fixed multiple compatibility issues
+- Fixed health check for database_utils v2.3.1 format
+- Removed non-existent insert_trading_signal import
+- Added inline _save_trading_signal method
+- Added missing _register_with_coordination method
+
 v2.1.1 (2025-07-07) - Fixed database utilities import
 - Removed non-existent insert_trading_signal import
 - Added inline database insertion for trading signals
@@ -50,10 +56,10 @@ from concurrent.futures import ThreadPoolExecutor
 from structlog import get_logger
 import redis
 
-# Import database utilities - Fixed imports
+# Import database utilities
 from database_utils import (
     get_db_connection,
-    get_redis,  # Fixed from get_redis_connection
+    get_redis,
     health_check
 )
 
@@ -128,7 +134,7 @@ class TechnicalAnalysisService:
         # Register with coordination
         self._register_with_coordination()
         
-        self.logger.info("Technical Analysis Service v2.1.1 initialized",
+        self.logger.info("Technical Analysis Service v2.1.2 initialized",
                         environment=os.getenv('ENVIRONMENT', 'development'),
                         talib_available=TALIB_AVAILABLE)
         
@@ -166,7 +172,7 @@ class TechnicalAnalysisService:
                     'service_info': {
                         'url': f"http://technical-service:{self.port}",
                         'port': self.port,
-                        'version': '2.1.1',
+                        'version': '2.1.2',
                         'capabilities': ['technical_indicators', 'signal_generation', 'risk_levels']
                     }
                 },
@@ -186,12 +192,26 @@ class TechnicalAnalysisService:
         def healthcheck():
             """Health check endpoint"""
             db_health = health_check()
+            
+            # Handle different database_utils versions
+            db_status = False
+            redis_status = False
+            
+            if 'postgresql' in db_health:
+                # v2.3.1 format
+                db_status = db_health['postgresql'].get('status') == 'healthy'
+                redis_status = db_health['redis'].get('status') == 'healthy'
+            elif 'database' in db_health:
+                # older format
+                db_status = db_health['database']
+                redis_status = db_health['redis']
+            
             return jsonify({
-                "status": "healthy" if db_health['database'] else "degraded",
+                "status": "healthy" if db_status else "degraded",
                 "service": self.service_name,
-                "version": "2.1.1",
-                "database": db_health['database'],
-                "redis": db_health['redis'],
+                "version": "2.1.2",
+                "database": db_status,
+                "redis": redis_status,
                 "talib": TALIB_AVAILABLE,
                 "timestamp": datetime.now().isoformat()
             })
@@ -346,7 +366,7 @@ class TechnicalAnalysisService:
         # Get technical analysis
         ta_result = self.analyze_with_catalyst_context(symbol, timeframe, catalyst_data)
         
-        if ta_result['status'] == 'insufficient_data':
+        if ta_result.get('status') == 'insufficient_data':
             return {
                 'symbol': symbol,
                 'signal': 'NO_SIGNAL',
@@ -455,12 +475,609 @@ class TechnicalAnalysisService:
             self.logger.error(f"Failed to save signal to database", error=str(e))
             # Don't fail the signal generation if DB save fails
             
-    # ... rest of the methods remain the same ...
-    
+    def _get_price_data(self, symbol: str, timeframe: str) -> Optional[pd.DataFrame]:
+        """Get price data for analysis"""
+        if not YFINANCE_AVAILABLE:
+            return self._get_mock_price_data(symbol, timeframe)
+            
+        try:
+            ticker = yf.Ticker(symbol)
+            
+            # Determine period based on timeframe
+            period_map = {
+                '1min': '7d',
+                '5min': '1mo',
+                '15min': '2mo',
+                '30min': '3mo',
+                '1h': '6mo',
+                '1d': '2y'
+            }
+            
+            period = period_map.get(timeframe, '1mo')
+            data = ticker.history(period=period, interval=timeframe)
+            
+            if data.empty:
+                self.logger.warning(f"No data retrieved for {symbol}")
+                return None
+                
+            return data
+            
+        except Exception as e:
+            self.logger.error(f"Error fetching data for {symbol}", error=str(e))
+            return None
+            
+    def _calculate_indicators(self, data: pd.DataFrame) -> Dict:
+        """Calculate all technical indicators"""
+        indicators = {}
+        
+        try:
+            # Price data
+            close = data['Close'].values
+            high = data['High'].values
+            low = data['Low'].values
+            volume = data['Volume'].values
+            
+            if TALIB_AVAILABLE:
+                # Use TA-Lib for calculations
+                indicators['rsi'] = float(talib.RSI(close, timeperiod=self.ta_config['rsi_period'])[-1])
+                
+                macd, signal, hist = talib.MACD(close,
+                                               fastperiod=self.ta_config['macd_fast'],
+                                               slowperiod=self.ta_config['macd_slow'],
+                                               signalperiod=self.ta_config['macd_signal'])
+                indicators['macd'] = float(macd[-1]) if not np.isnan(macd[-1]) else 0
+                indicators['macd_signal'] = float(signal[-1]) if not np.isnan(signal[-1]) else 0
+                indicators['macd_histogram'] = float(hist[-1]) if not np.isnan(hist[-1]) else 0
+                
+                # Bollinger Bands
+                upper, middle, lower = talib.BBANDS(close,
+                                                   timeperiod=self.ta_config['bb_period'],
+                                                   nbdevup=self.ta_config['bb_std'],
+                                                   nbdevdn=self.ta_config['bb_std'])
+                indicators['bb_upper'] = float(upper[-1])
+                indicators['bb_middle'] = float(middle[-1])
+                indicators['bb_lower'] = float(lower[-1])
+                
+                # Moving averages
+                indicators['sma_short'] = float(talib.SMA(close, timeperiod=self.ta_config['sma_short'])[-1])
+                indicators['sma_long'] = float(talib.SMA(close, timeperiod=self.ta_config['sma_long'])[-1])
+                indicators['ema_short'] = float(talib.EMA(close, timeperiod=self.ta_config['ema_short'])[-1])
+                indicators['ema_long'] = float(talib.EMA(close, timeperiod=self.ta_config['ema_long'])[-1])
+                
+                # ATR for volatility
+                indicators['atr'] = float(talib.ATR(high, low, close, timeperiod=self.ta_config['atr_period'])[-1])
+                
+                # ADX for trend strength
+                indicators['adx'] = float(talib.ADX(high, low, close, timeperiod=self.ta_config['adx_period'])[-1])
+                
+                # Stochastic
+                slowk, slowd = talib.STOCH(high, low, close,
+                                          fastk_period=self.ta_config['stoch_period'],
+                                          slowk_period=3,
+                                          slowd_period=3)
+                indicators['stoch_k'] = float(slowk[-1])
+                indicators['stoch_d'] = float(slowd[-1])
+                
+            else:
+                # Manual calculations as fallback
+                indicators = self._calculate_indicators_manual(close, high, low, volume)
+                
+            # Current price info
+            indicators['close'] = float(close[-1])
+            indicators['volume'] = int(volume[-1])
+            indicators['price_change'] = float((close[-1] - close[-2]) / close[-2] * 100)
+            
+            # Volume analysis
+            avg_volume = np.mean(volume[:-1])
+            indicators['volume_ratio'] = float(volume[-1] / avg_volume) if avg_volume > 0 else 1
+            
+        except Exception as e:
+            self.logger.error("Error calculating indicators", error=str(e))
+            
+        return indicators
+        
+    def _calculate_indicators_manual(self, close: np.ndarray, high: np.ndarray,
+                                   low: np.ndarray, volume: np.ndarray) -> Dict:
+        """Manual indicator calculations when TA-Lib not available"""
+        indicators = {}
+        
+        # RSI
+        def calculate_rsi(prices, period=14):
+            deltas = np.diff(prices)
+            seed = deltas[:period+1]
+            up = seed[seed >= 0].sum() / period
+            down = -seed[seed < 0].sum() / period
+            rs = up / down if down != 0 else 0
+            rsi = np.zeros_like(prices)
+            rsi[:period] = 100. - 100. / (1. + rs)
+            
+            for i in range(period, len(prices)):
+                delta = deltas[i-1]
+                if delta > 0:
+                    upval = delta
+                    downval = 0.
+                else:
+                    upval = 0.
+                    downval = -delta
+                    
+                up = (up * (period - 1) + upval) / period
+                down = (down * (period - 1) + downval) / period
+                rs = up / down if down != 0 else 0
+                rsi[i] = 100. - 100. / (1. + rs)
+                
+            return rsi
+            
+        indicators['rsi'] = float(calculate_rsi(close, self.ta_config['rsi_period'])[-1])
+        
+        # Simple moving averages
+        indicators['sma_short'] = float(np.mean(close[-self.ta_config['sma_short']:]))
+        indicators['sma_long'] = float(np.mean(close[-self.ta_config['sma_long']:]))
+        
+        # EMA approximation
+        def calculate_ema(prices, period):
+            ema = np.zeros_like(prices)
+            ema[0] = prices[0]
+            alpha = 2 / (period + 1)
+            
+            for i in range(1, len(prices)):
+                ema[i] = alpha * prices[i] + (1 - alpha) * ema[i-1]
+                
+            return ema
+            
+        indicators['ema_short'] = float(calculate_ema(close, self.ta_config['ema_short'])[-1])
+        indicators['ema_long'] = float(calculate_ema(close, self.ta_config['ema_long'])[-1])
+        
+        # MACD
+        ema_fast = calculate_ema(close, self.ta_config['macd_fast'])
+        ema_slow = calculate_ema(close, self.ta_config['macd_slow'])
+        macd_line = ema_fast - ema_slow
+        signal_line = calculate_ema(macd_line, self.ta_config['macd_signal'])
+        
+        indicators['macd'] = float(macd_line[-1])
+        indicators['macd_signal'] = float(signal_line[-1])
+        indicators['macd_histogram'] = float(macd_line[-1] - signal_line[-1])
+        
+        # Bollinger Bands
+        bb_sma = np.mean(close[-self.ta_config['bb_period']:])
+        bb_std = np.std(close[-self.ta_config['bb_period']:])
+        
+        indicators['bb_upper'] = float(bb_sma + self.ta_config['bb_std'] * bb_std)
+        indicators['bb_middle'] = float(bb_sma)
+        indicators['bb_lower'] = float(bb_sma - self.ta_config['bb_std'] * bb_std)
+        
+        # ATR approximation
+        tr = np.maximum(high - low, 
+                       np.maximum(abs(high - np.roll(close, 1)), 
+                                 abs(low - np.roll(close, 1))))
+        indicators['atr'] = float(np.mean(tr[-self.ta_config['atr_period']:]))
+        
+        # ADX (simplified)
+        indicators['adx'] = 25.0  # Default neutral value
+        
+        # Stochastic
+        lowest_low = np.min(low[-self.ta_config['stoch_period']:])
+        highest_high = np.max(high[-self.ta_config['stoch_period']:])
+        
+        if highest_high - lowest_low > 0:
+            k_percent = 100 * (close[-1] - lowest_low) / (highest_high - lowest_low)
+        else:
+            k_percent = 50
+            
+        indicators['stoch_k'] = float(k_percent)
+        indicators['stoch_d'] = float(k_percent)  # Simplified
+        
+        return indicators
+        
+    def _determine_trend(self, indicators: Dict, price_data: pd.DataFrame) -> Dict:
+        """Determine current trend based on indicators"""
+        trend_signals = []
+        
+        # Moving average trend
+        if indicators.get('sma_short', 0) > indicators.get('sma_long', 0):
+            trend_signals.append(1)  # Bullish
+        else:
+            trend_signals.append(-1)  # Bearish
+            
+        # EMA trend
+        if indicators.get('ema_short', 0) > indicators.get('ema_long', 0):
+            trend_signals.append(1)
+        else:
+            trend_signals.append(-1)
+            
+        # Price vs moving averages
+        current_price = indicators.get('close', 0)
+        if current_price > indicators.get('sma_short', 0):
+            trend_signals.append(1)
+        else:
+            trend_signals.append(-1)
+            
+        # MACD trend
+        if indicators.get('macd', 0) > indicators.get('macd_signal', 0):
+            trend_signals.append(1)
+        else:
+            trend_signals.append(-1)
+            
+        # Calculate trend score
+        trend_score = sum(trend_signals) / len(trend_signals)
+        
+        # Determine trend direction
+        if trend_score > 0.5:
+            direction = 'bullish'
+        elif trend_score < -0.5:
+            direction = 'bearish'
+        else:
+            direction = 'neutral'
+            
+        # Trend strength from ADX
+        adx = indicators.get('adx', 0)
+        if adx > 40:
+            strength = 'strong'
+        elif adx > 25:
+            strength = 'moderate'
+        else:
+            strength = 'weak'
+            
+        return {
+            'direction': direction,
+            'strength': strength,
+            'score': trend_score,
+            'adx': adx
+        }
+        
+    def _calculate_momentum(self, indicators: Dict) -> Dict:
+        """Calculate momentum indicators"""
+        momentum_score = 0
+        signals = []
+        
+        # RSI momentum
+        rsi = indicators.get('rsi', 50)
+        if rsi < self.ta_config['rsi_oversold']:
+            signals.append(('rsi', 'oversold', 1))
+            momentum_score += 1
+        elif rsi > self.ta_config['rsi_overbought']:
+            signals.append(('rsi', 'overbought', -1))
+            momentum_score -= 1
+        else:
+            signals.append(('rsi', 'neutral', 0))
+            
+        # MACD momentum
+        macd_hist = indicators.get('macd_histogram', 0)
+        if macd_hist > 0 and indicators.get('macd', 0) > 0:
+            signals.append(('macd', 'bullish', 1))
+            momentum_score += 1
+        elif macd_hist < 0 and indicators.get('macd', 0) < 0:
+            signals.append(('macd', 'bearish', -1))
+            momentum_score -= 1
+        else:
+            signals.append(('macd', 'neutral', 0))
+            
+        # Stochastic momentum
+        stoch_k = indicators.get('stoch_k', 50)
+        if stoch_k < 20:
+            signals.append(('stochastic', 'oversold', 1))
+            momentum_score += 1
+        elif stoch_k > 80:
+            signals.append(('stochastic', 'overbought', -1))
+            momentum_score -= 1
+        else:
+            signals.append(('stochastic', 'neutral', 0))
+            
+        # Volume momentum
+        volume_ratio = indicators.get('volume_ratio', 1)
+        if volume_ratio > 2:
+            signals.append(('volume', 'high', 1))
+            momentum_score += 0.5
+        elif volume_ratio < 0.5:
+            signals.append(('volume', 'low', -0.5))
+            momentum_score -= 0.5
+        else:
+            signals.append(('volume', 'normal', 0))
+            
+        # Normalize score
+        momentum_score = momentum_score / 4  # 4 indicators
+        
+        return {
+            'score': momentum_score,
+            'signals': signals,
+            'direction': 'bullish' if momentum_score > 0.25 else 'bearish' if momentum_score < -0.25 else 'neutral'
+        }
+        
+    def _calculate_volatility(self, price_data: pd.DataFrame) -> Dict:
+        """Calculate volatility metrics"""
+        close_prices = price_data['Close'].values
+        returns = np.diff(close_prices) / close_prices[:-1]
+        
+        # Historical volatility
+        hist_vol = np.std(returns) * np.sqrt(252)  # Annualized
+        
+        # Average True Range
+        atr = self._calculate_atr(price_data)
+        
+        # Bollinger Band width
+        bb_width = 0
+        if 'bb_upper' in price_data.columns and 'bb_lower' in price_data.columns:
+            bb_upper = price_data['bb_upper'].iloc[-1]
+            bb_lower = price_data['bb_lower'].iloc[-1]
+            bb_middle = (bb_upper + bb_lower) / 2
+            bb_width = (bb_upper - bb_lower) / bb_middle if bb_middle > 0 else 0
+            
+        return {
+            'historical': hist_vol,
+            'atr': atr,
+            'bb_width': bb_width,
+            'level': 'high' if hist_vol > 0.4 else 'medium' if hist_vol > 0.2 else 'low'
+        }
+        
+    def _calculate_atr(self, price_data: pd.DataFrame, period: int = 14) -> float:
+        """Calculate Average True Range"""
+        high = price_data['High'].values
+        low = price_data['Low'].values
+        close = price_data['Close'].values
+        
+        tr = np.maximum(high - low, 
+                       np.maximum(abs(high - np.roll(close, 1)), 
+                                 abs(low - np.roll(close, 1))))
+        
+        # Remove first element (NaN from roll)
+        tr = tr[1:]
+        
+        if len(tr) >= period:
+            return float(np.mean(tr[-period:]))
+        else:
+            return float(np.mean(tr))
+            
+    def _find_key_levels(self, price_data: pd.DataFrame) -> Dict:
+        """Find support and resistance levels"""
+        high = price_data['High'].values
+        low = price_data['Low'].values
+        close = price_data['Close'].values
+        
+        # Recent highs and lows
+        recent_high = np.max(high[-20:])
+        recent_low = np.min(low[-20:])
+        
+        # Pivot points
+        pivot = (recent_high + recent_low + close[-1]) / 3
+        r1 = 2 * pivot - recent_low
+        s1 = 2 * pivot - recent_high
+        r2 = pivot + (recent_high - recent_low)
+        s2 = pivot - (recent_high - recent_low)
+        
+        return {
+            'resistance_2': float(r2),
+            'resistance_1': float(r1),
+            'pivot': float(pivot),
+            'support_1': float(s1),
+            'support_2': float(s2),
+            'recent_high': float(recent_high),
+            'recent_low': float(recent_low)
+        }
+        
+    def _calculate_signal_strength(self, indicators: Dict, trend: Dict, 
+                                 momentum: Dict, catalyst_data: Dict = None) -> float:
+        """Calculate overall signal strength"""
+        strength = 50  # Base strength
+        
+        # Trend contribution
+        if trend['direction'] == 'bullish':
+            strength += 10 if trend['strength'] == 'strong' else 5
+        elif trend['direction'] == 'bearish':
+            strength -= 10 if trend['strength'] == 'strong' else 5
+            
+        # Momentum contribution
+        strength += momentum['score'] * 20
+        
+        # Indicator alignment
+        price = indicators.get('close', 0)
+        sma = indicators.get('sma_short', 0)
+        
+        if price > sma and trend['direction'] == 'bullish':
+            strength += 5
+        elif price < sma and trend['direction'] == 'bearish':
+            strength += 5
+            
+        # Catalyst boost
+        if catalyst_data:
+            catalyst_score = catalyst_data.get('score', 0)
+            strength += catalyst_score * 10
+            
+        # Ensure within bounds
+        strength = max(0, min(100, strength))
+        
+        return strength
+        
+    def _calculate_catalyst_weight(self, catalyst_data: Dict) -> float:
+        """Calculate weight multiplier based on catalyst strength"""
+        base_weight = 1.0
+        
+        # Catalyst type weights
+        type_weights = {
+            'earnings': 1.5,
+            'fda': 1.8,
+            'merger': 1.6,
+            'guidance': 1.4,
+            'analyst': 1.2,
+            'insider': 1.3
+        }
+        
+        catalyst_type = catalyst_data.get('type')
+        if catalyst_type in type_weights:
+            base_weight *= type_weights[catalyst_type]
+            
+        # News volume weight
+        news_count = catalyst_data.get('news_count', 0)
+        if news_count > 10:
+            base_weight *= 1.2
+        elif news_count > 5:
+            base_weight *= 1.1
+            
+        # Sentiment weight
+        sentiment = catalyst_data.get('sentiment', 'neutral')
+        if sentiment == 'very_positive':
+            base_weight *= 1.3
+        elif sentiment == 'positive':
+            base_weight *= 1.1
+        elif sentiment == 'negative':
+            base_weight *= 0.9
+        elif sentiment == 'very_negative':
+            base_weight *= 0.7
+            
+        return base_weight
+        
+    def _determine_signal_type(self, ta_result: Dict, patterns: List[Dict],
+                             catalyst_data: Dict, confidence: float) -> str:
+        """Determine the type of signal to generate"""
+        trend = ta_result.get('trend', {})
+        momentum = ta_result.get('momentum', {})
+        
+        # Check for strong directional signals
+        if trend['direction'] == 'bullish' and momentum['direction'] == 'bullish':
+            if confidence > 70:
+                return 'BUY'
+            else:
+                return 'BUY_WEAK'
+        elif trend['direction'] == 'bearish' and momentum['direction'] == 'bearish':
+            if confidence > 70:
+                return 'SELL'
+            else:
+                return 'SELL_WEAK'
+        else:
+            return 'HOLD'
+            
+    def _calculate_entry_exit_levels(self, signal_type: str, current_price: float,
+                                   atr: float, support_resistance: Dict) -> Dict:
+        """Calculate entry, stop loss, and take profit levels"""
+        levels = {
+            'entry': current_price,
+            'stop_loss': 0,
+            'target_1': 0,
+            'target_2': 0,
+            'risk_reward_ratio': 0
+        }
+        
+        if signal_type in ['BUY', 'BUY_WEAK']:
+            # Buy signal levels
+            levels['stop_loss'] = current_price - (atr * self.ta_config['stop_loss_atr_multiplier'])
+            levels['target_1'] = current_price + (atr * self.ta_config['take_profit_atr_multiplier'])
+            levels['target_2'] = current_price + (atr * self.ta_config['take_profit_atr_multiplier'] * 1.5)
+            
+            # Adjust for support/resistance
+            if support_resistance['support_1'] > levels['stop_loss']:
+                levels['stop_loss'] = support_resistance['support_1'] * 0.99
+                
+            if support_resistance['resistance_1'] < levels['target_1']:
+                levels['target_1'] = support_resistance['resistance_1'] * 0.99
+                
+        elif signal_type in ['SELL', 'SELL_WEAK']:
+            # Sell signal levels
+            levels['stop_loss'] = current_price + (atr * self.ta_config['stop_loss_atr_multiplier'])
+            levels['target_1'] = current_price - (atr * self.ta_config['take_profit_atr_multiplier'])
+            levels['target_2'] = current_price - (atr * self.ta_config['take_profit_atr_multiplier'] * 1.5)
+            
+            # Adjust for support/resistance
+            if support_resistance['resistance_1'] < levels['stop_loss']:
+                levels['stop_loss'] = support_resistance['resistance_1'] * 1.01
+                
+            if support_resistance['support_1'] > levels['target_1']:
+                levels['target_1'] = support_resistance['support_1'] * 1.01
+                
+        # Calculate risk/reward
+        risk = abs(current_price - levels['stop_loss'])
+        reward = abs(levels['target_1'] - current_price)
+        
+        if risk > 0:
+            levels['risk_reward_ratio'] = round(reward / risk, 2)
+        else:
+            levels['risk_reward_ratio'] = 0
+            
+        return levels
+        
+    def _identify_key_factors(self, ta_result: Dict, patterns: List[Dict],
+                            catalyst_data: Dict) -> List[str]:
+        """Identify key factors driving the signal"""
+        factors = []
+        
+        # Trend factors
+        trend = ta_result.get('trend', {})
+        if trend['direction'] != 'neutral' and trend['strength'] in ['moderate', 'strong']:
+            factors.append(f"{trend['strength']} {trend['direction']} trend")
+            
+        # Momentum factors
+        momentum = ta_result.get('momentum', {})
+        for signal_name, status, _ in momentum.get('signals', []):
+            if status in ['oversold', 'overbought']:
+                factors.append(f"{signal_name} {status}")
+                
+        # Pattern factors
+        for pattern in patterns[:2]:  # Top 2 patterns
+            if pattern.get('final_confidence', 0) > 70:
+                factors.append(f"{pattern['pattern_name']} pattern")
+                
+        # Catalyst factors
+        if catalyst_data:
+            catalyst_type = catalyst_data.get('type')
+            if catalyst_type:
+                factors.append(f"{catalyst_type} catalyst")
+                
+        # Volume factor
+        indicators = ta_result.get('indicators', {})
+        if indicators.get('volume_ratio', 1) > 2:
+            factors.append("high volume")
+            
+        return factors[:5]  # Limit to 5 key factors
+        
+    def _calculate_position_size(self, confidence: float, signal_type: str) -> float:
+        """Calculate recommended position size based on confidence"""
+        if signal_type in ['BUY', 'SELL']:
+            if confidence > 80:
+                return 15.0  # 15% of portfolio
+            elif confidence > 70:
+                return 10.0  # 10% of portfolio
+            else:
+                return 5.0   # 5% of portfolio
+        else:
+            return 0.0  # No position for weak signals or holds
+            
+    def _calculate_support_resistance(self, symbol: str, timeframe: str) -> Dict:
+        """Calculate detailed support and resistance levels"""
+        price_data = self._get_price_data(symbol, timeframe)
+        
+        if price_data is None or len(price_data) < 20:
+            return {}
+            
+        return self._find_key_levels(price_data)
+        
+    def _get_mock_price_data(self, symbol: str, timeframe: str) -> pd.DataFrame:
+        """Generate mock price data for testing"""
+        # Generate 100 periods of random walk data
+        periods = 100
+        base_price = 100
+        
+        dates = pd.date_range(end=datetime.now(), periods=periods, freq='5min')
+        
+        # Random walk
+        returns = np.random.normal(0, 0.02, periods)
+        prices = base_price * np.exp(np.cumsum(returns))
+        
+        # OHLC with some realistic relationships
+        data = pd.DataFrame({
+            'Open': prices * (1 + np.random.uniform(-0.005, 0.005, periods)),
+            'High': prices * (1 + np.random.uniform(0, 0.01, periods)),
+            'Low': prices * (1 + np.random.uniform(-0.01, 0, periods)),
+            'Close': prices,
+            'Volume': np.random.randint(100000, 1000000, periods)
+        }, index=dates)
+        
+        # Ensure high is highest and low is lowest
+        data['High'] = data[['Open', 'High', 'Low', 'Close']].max(axis=1)
+        data['Low'] = data[['Open', 'High', 'Low', 'Close']].min(axis=1)
+        
+        return data
+        
     def run(self):
         """Start the technical analysis service"""
         self.logger.info("Starting Technical Analysis Service",
-                        version="2.1.1",
+                        version="2.1.2",
                         port=self.port,
                         environment=os.getenv('ENVIRONMENT', 'development'))
         

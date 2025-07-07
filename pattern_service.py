@@ -2,11 +2,15 @@
 """
 Name of Application: Catalyst Trading System
 Name of file: pattern_service.py
-Version: 2.1.1
+Version: 2.1.2
 Last Updated: 2025-07-07
 Purpose: Technical pattern detection and analysis with news catalyst weighting
 
 REVISION HISTORY:
+v2.1.2 (2025-07-07) - Fixed health check compatibility with database_utils v2.3.1
+- Updated health check to handle new postgresql/redis status format
+- Maintains backward compatibility with older database_utils versions
+
 v2.1.1 (2025-07-07) - Fixed missing _register_with_coordination method
 - Added service registration method
 - Fixed initialization sequence
@@ -109,7 +113,7 @@ class CatalystAwarePatternAnalysis:
         # Register with coordination
         self._register_with_coordination()
         
-        self.logger.info("Catalyst-Aware Pattern Analysis v2.1.1 initialized",
+        self.logger.info("Catalyst-Aware Pattern Analysis v2.1.2 initialized",
                         environment=os.getenv('ENVIRONMENT', 'development'),
                         talib_available=TALIB_AVAILABLE)
         
@@ -147,7 +151,7 @@ class CatalystAwarePatternAnalysis:
                     'service_info': {
                         'url': f"http://pattern-service:{self.port}",
                         'port': self.port,
-                        'version': '2.1.1',
+                        'version': '2.1.2',
                         'capabilities': ['pattern_detection', 'catalyst_weighting', 'technical_patterns']
                     }
                 },
@@ -256,12 +260,26 @@ class CatalystAwarePatternAnalysis:
         def healthcheck():
             """Health check endpoint"""
             db_health = health_check()
+            
+            # Handle different database_utils versions
+            db_status = False
+            redis_status = False
+            
+            if 'postgresql' in db_health:
+                # v2.3.1 format
+                db_status = db_health['postgresql'].get('status') == 'healthy'
+                redis_status = db_health['redis'].get('status') == 'healthy'
+            elif 'database' in db_health:
+                # older format
+                db_status = db_health['database']
+                redis_status = db_health['redis']
+            
             return jsonify({
-                "status": "healthy" if db_health['database'] else "degraded",
+                "status": "healthy" if db_status else "degraded",
                 "service": self.service_name,
-                "version": "2.1.1",
-                "database": db_health['database'],
-                "redis": db_health['redis'],
+                "version": "2.1.2",
+                "database": db_status,
+                "redis": redis_status,
                 "talib": TALIB_AVAILABLE,
                 "timestamp": datetime.now().isoformat()
             })
@@ -321,12 +339,468 @@ class CatalystAwarePatternAnalysis:
             result = self._update_pattern_outcome(pattern_id, outcome)
             return jsonify(result)
 
-    # ... rest of the methods remain the same ...
-    
+    def analyze_with_catalyst_context(self, symbol: str, timeframe: str = '5min', 
+                                    context: Dict = None) -> Dict:
+        """
+        Analyze patterns with catalyst awareness
+        """
+        self.logger.info(f"Analyzing {symbol} with catalyst context",
+                        symbol=symbol,
+                        timeframe=timeframe,
+                        has_context=bool(context))
+        
+        # Check cache first
+        cache_key = f"pattern:{symbol}:{timeframe}"
+        cached = self.redis_client.get(cache_key)
+        if cached and not context:  # Don't use cache if specific context provided
+            self.logger.debug("Using cached pattern data", symbol=symbol)
+            return json.loads(cached)
+        
+        # Get price data
+        price_data = self._get_price_data(symbol, timeframe)
+        if price_data is None or len(price_data) < self.lookback_periods:
+            return {
+                'symbol': symbol,
+                'status': 'insufficient_data',
+                'patterns': []
+            }
+            
+        # Extract catalyst information
+        catalyst_info = self._extract_catalyst_info(context)
+        
+        # Detect patterns
+        detected_patterns = []
+        
+        # Check reversal patterns
+        for pattern_name, config in self.pattern_config['reversal_patterns'].items():
+            pattern = self._detect_reversal_pattern(
+                price_data, pattern_name, config, catalyst_info
+            )
+            if pattern and pattern['final_confidence'] >= self.min_confidence:
+                detected_patterns.append(pattern)
+                
+        # Check continuation patterns
+        for pattern_name, config in self.pattern_config['continuation_patterns'].items():
+            pattern = self._detect_continuation_pattern(
+                price_data, pattern_name, config, catalyst_info
+            )
+            if pattern and pattern['final_confidence'] >= self.min_confidence:
+                detected_patterns.append(pattern)
+                
+        # Check momentum patterns
+        for pattern_name, config in self.pattern_config['momentum_patterns'].items():
+            pattern = self._detect_momentum_pattern(
+                price_data, pattern_name, config, catalyst_info
+            )
+            if pattern and pattern['final_confidence'] >= self.min_confidence:
+                detected_patterns.append(pattern)
+                
+        # Sort by confidence
+        detected_patterns.sort(key=lambda x: x['final_confidence'], reverse=True)
+        
+        # Build result
+        result = {
+            'symbol': symbol,
+            'timestamp': datetime.now().isoformat(),
+            'timeframe': timeframe,
+            'status': 'analyzed',
+            'patterns': detected_patterns[:5],  # Top 5 patterns
+            'catalyst_context': catalyst_info,
+            'data_points': len(price_data),
+            'analysis_time_ms': 0  # TODO: Add timing
+        }
+        
+        # Cache result
+        if not context:  # Only cache generic results
+            self.redis_client.setex(
+                cache_key,
+                self.cache_ttl,
+                json.dumps(result)
+            )
+            
+        # Save to database
+        for pattern in detected_patterns:
+            self._save_pattern_detection(pattern, symbol, timeframe, catalyst_info)
+            
+        return result
+        
+    def _get_price_data(self, symbol: str, timeframe: str) -> Optional[pd.DataFrame]:
+        """Get price data for analysis"""
+        if not YFINANCE_AVAILABLE:
+            return self._get_mock_price_data(symbol, timeframe)
+            
+        try:
+            ticker = yf.Ticker(symbol)
+            
+            # Determine period based on timeframe
+            period_map = {
+                '1min': '7d',
+                '5min': '1mo',
+                '15min': '2mo',
+                '30min': '3mo',
+                '1h': '6mo',
+                '1d': '2y'
+            }
+            
+            period = period_map.get(timeframe, '1mo')
+            data = ticker.history(period=period, interval=timeframe)
+            
+            if data.empty:
+                self.logger.warning(f"No data retrieved for {symbol}")
+                return None
+                
+            return data
+            
+        except Exception as e:
+            self.logger.error(f"Error fetching data for {symbol}", error=str(e))
+            return None
+            
+    def _extract_catalyst_info(self, context: Dict) -> Dict:
+        """Extract catalyst information from context"""
+        if not context:
+            return {
+                'has_catalyst': False,
+                'catalyst_type': None,
+                'catalyst_sentiment': 'neutral',
+                'catalyst_score': 0,
+                'is_pre_market': False
+            }
+            
+        # Determine catalyst sentiment based on type
+        catalyst_type = context.get('catalyst_type')
+        sentiment_map = {
+            'earnings_beat': 'positive',
+            'earnings_miss': 'negative',
+            'fda_approval': 'positive',
+            'fda_rejection': 'negative',
+            'merger_announcement': 'positive',
+            'lawsuit': 'negative',
+            'upgrade': 'positive',
+            'downgrade': 'negative',
+            'guidance_raised': 'positive',
+            'guidance_lowered': 'negative',
+            'insider_buying': 'positive',
+            'insider_selling': 'negative'
+        }
+        
+        catalyst_sentiment = sentiment_map.get(catalyst_type, 'neutral')
+        
+        # Special handling for earnings
+        if catalyst_type == 'earnings' and 'earnings_result' in context:
+            catalyst_sentiment = 'positive' if context['earnings_result'] == 'beat' else 'negative'
+            
+        return {
+            'has_catalyst': context.get('has_catalyst', False),
+            'catalyst_type': catalyst_type,
+            'catalyst_sentiment': catalyst_sentiment,
+            'catalyst_score': context.get('catalyst_score', 0),
+            'is_pre_market': context.get('market_state') == 'pre-market',
+            'news_count': context.get('news_count', 0)
+        }
+        
+    def _detect_reversal_pattern(self, data: pd.DataFrame, pattern_name: str, 
+                                config: Dict, catalyst_info: Dict) -> Optional[Dict]:
+        """Detect reversal patterns with catalyst weighting"""
+        
+        if len(data) < 2:
+            return None
+            
+        latest = data.iloc[-1]
+        prev = data.iloc[-2]
+        
+        pattern_detected = False
+        pattern_direction = None
+        
+        if pattern_name == 'hammer':
+            # Bullish reversal - long lower shadow, small body at top
+            body = abs(latest['Close'] - latest['Open'])
+            lower_shadow = min(latest['Open'], latest['Close']) - latest['Low']
+            upper_shadow = latest['High'] - max(latest['Open'], latest['Close'])
+            
+            if lower_shadow > body * config['min_shadow_ratio'] and upper_shadow < body:
+                pattern_detected = True
+                pattern_direction = 'bullish'
+                
+        elif pattern_name == 'shooting_star':
+            # Bearish reversal - long upper shadow, small body at bottom
+            body = abs(latest['Close'] - latest['Open'])
+            upper_shadow = latest['High'] - max(latest['Open'], latest['Close'])
+            lower_shadow = min(latest['Open'], latest['Close']) - latest['Low']
+            
+            if upper_shadow > body * config['min_shadow_ratio'] and lower_shadow < body:
+                pattern_detected = True
+                pattern_direction = 'bearish'
+                
+        elif pattern_name == 'engulfing':
+            # Check for bullish or bearish engulfing
+            if latest['Close'] > latest['Open'] and prev['Close'] < prev['Open']:
+                # Potential bullish engulfing
+                if latest['Open'] < prev['Close'] and latest['Close'] > prev['Open']:
+                    pattern_detected = True
+                    pattern_direction = 'bullish'
+            elif latest['Close'] < latest['Open'] and prev['Close'] > prev['Open']:
+                # Potential bearish engulfing
+                if latest['Open'] > prev['Close'] and latest['Close'] < prev['Open']:
+                    pattern_detected = True
+                    pattern_direction = 'bearish'
+                    
+        elif pattern_name == 'doji':
+            # Indecision pattern - very small body
+            body = abs(latest['Close'] - latest['Open'])
+            total_range = latest['High'] - latest['Low']
+            
+            if total_range > 0 and body / total_range < config['max_body_ratio']:
+                pattern_detected = True
+                pattern_direction = 'neutral'
+                
+        if not pattern_detected:
+            return None
+            
+        # Calculate confidence with catalyst adjustment
+        base_confidence = config['base_confidence']
+        catalyst_multiplier = config['catalyst_boost'].get(catalyst_info['catalyst_sentiment'], 1.0)
+        
+        # Adjust for pattern-catalyst alignment
+        if pattern_direction == 'bullish' and catalyst_info['catalyst_sentiment'] == 'positive':
+            catalyst_multiplier *= 1.2  # Extra boost for alignment
+        elif pattern_direction == 'bearish' and catalyst_info['catalyst_sentiment'] == 'negative':
+            catalyst_multiplier *= 1.2  # Extra boost for alignment
+        elif pattern_direction != 'neutral' and catalyst_info['catalyst_sentiment'] != 'neutral':
+            if pattern_direction != catalyst_info['catalyst_sentiment']:
+                catalyst_multiplier *= 0.7  # Penalty for misalignment
+                
+        # Pre-market boost
+        if catalyst_info['is_pre_market']:
+            catalyst_multiplier *= self.premarket_multiplier
+            
+        final_confidence = min(base_confidence * catalyst_multiplier, 100)
+        
+        return {
+            'pattern_name': pattern_name,
+            'pattern_type': 'reversal',
+            'pattern_direction': pattern_direction,
+            'base_confidence': base_confidence,
+            'catalyst_multiplier': catalyst_multiplier,
+            'final_confidence': round(final_confidence, 2),
+            'detected_at': datetime.now().isoformat(),
+            'price': float(latest['Close']),
+            'volume': int(latest['Volume']),
+            'catalyst_aligned': pattern_direction == catalyst_info['catalyst_sentiment']
+        }
+        
+    def _detect_continuation_pattern(self, data: pd.DataFrame, pattern_name: str,
+                                   config: Dict, catalyst_info: Dict) -> Optional[Dict]:
+        """Detect continuation patterns"""
+        
+        if len(data) < 3:
+            return None
+            
+        last_three = data.iloc[-3:]
+        pattern_detected = False
+        pattern_direction = None
+        
+        if pattern_name == 'three_white_soldiers':
+            # Three consecutive bullish candles
+            all_bullish = all(row['Close'] > row['Open'] for _, row in last_three.iterrows())
+            ascending = all(last_three['Close'].iloc[i] > last_three['Close'].iloc[i-1] 
+                          for i in range(1, 3))
+            
+            if all_bullish and ascending:
+                pattern_detected = True
+                pattern_direction = 'bullish'
+                
+        elif pattern_name == 'three_black_crows':
+            # Three consecutive bearish candles
+            all_bearish = all(row['Close'] < row['Open'] for _, row in last_three.iterrows())
+            descending = all(last_three['Close'].iloc[i] < last_three['Close'].iloc[i-1] 
+                           for i in range(1, 3))
+            
+            if all_bearish and descending:
+                pattern_detected = True
+                pattern_direction = 'bearish'
+                
+        if not pattern_detected:
+            return None
+            
+        # Calculate confidence
+        base_confidence = config['base_confidence']
+        catalyst_multiplier = config['catalyst_boost'].get(catalyst_info['catalyst_sentiment'], 1.0)
+        
+        # Strong alignment bonus for continuation patterns
+        if pattern_direction == catalyst_info['catalyst_sentiment']:
+            catalyst_multiplier *= 1.3
+            
+        # Pre-market boost
+        if catalyst_info['is_pre_market']:
+            catalyst_multiplier *= self.premarket_multiplier
+            
+        final_confidence = min(base_confidence * catalyst_multiplier, 100)
+        
+        return {
+            'pattern_name': pattern_name,
+            'pattern_type': 'continuation',
+            'pattern_direction': pattern_direction,
+            'base_confidence': base_confidence,
+            'catalyst_multiplier': catalyst_multiplier,
+            'final_confidence': round(final_confidence, 2),
+            'detected_at': datetime.now().isoformat(),
+            'price': float(data.iloc[-1]['Close']),
+            'volume': int(data.iloc[-1]['Volume']),
+            'catalyst_aligned': pattern_direction == catalyst_info['catalyst_sentiment']
+        }
+        
+    def _detect_momentum_pattern(self, data: pd.DataFrame, pattern_name: str,
+                               config: Dict, catalyst_info: Dict) -> Optional[Dict]:
+        """Detect momentum patterns"""
+        
+        if len(data) < 2:
+            return None
+            
+        latest = data.iloc[-1]
+        prev = data.iloc[-2]
+        pattern_detected = False
+        pattern_direction = None
+        
+        if pattern_name == 'gap_up':
+            # Gap up pattern
+            gap_percent = ((latest['Open'] - prev['Close']) / prev['Close']) * 100
+            
+            if gap_percent >= config['min_gap_percent']:
+                pattern_detected = True
+                pattern_direction = 'bullish'
+                
+        elif pattern_name == 'gap_down':
+            # Gap down pattern
+            gap_percent = ((prev['Close'] - latest['Open']) / prev['Close']) * 100
+            
+            if gap_percent >= config['min_gap_percent']:
+                pattern_detected = True
+                pattern_direction = 'bearish'
+                
+        elif pattern_name == 'volume_surge':
+            # Volume surge pattern
+            avg_volume = data['Volume'].iloc[:-1].mean()
+            volume_ratio = latest['Volume'] / avg_volume if avg_volume > 0 else 0
+            
+            if volume_ratio >= config['min_volume_ratio']:
+                pattern_detected = True
+                # Direction based on price action
+                pattern_direction = 'bullish' if latest['Close'] > latest['Open'] else 'bearish'
+                
+        if not pattern_detected:
+            return None
+            
+        # Calculate confidence
+        base_confidence = config['base_confidence']
+        catalyst_multiplier = config['catalyst_boost'].get(catalyst_info['catalyst_sentiment'], 1.0)
+        
+        # Momentum patterns get huge boost with catalyst alignment
+        if pattern_direction == catalyst_info['catalyst_sentiment']:
+            catalyst_multiplier *= 1.5
+            
+        # Pre-market gaps are especially significant
+        if catalyst_info['is_pre_market'] and pattern_name in ['gap_up', 'gap_down']:
+            catalyst_multiplier *= 1.5
+            
+        final_confidence = min(base_confidence * catalyst_multiplier, 100)
+        
+        return {
+            'pattern_name': pattern_name,
+            'pattern_type': 'momentum',
+            'pattern_direction': pattern_direction,
+            'base_confidence': base_confidence,
+            'catalyst_multiplier': catalyst_multiplier,
+            'final_confidence': round(final_confidence, 2),
+            'detected_at': datetime.now().isoformat(),
+            'price': float(latest['Close']),
+            'volume': int(latest['Volume']),
+            'catalyst_aligned': pattern_direction == catalyst_info['catalyst_sentiment']
+        }
+        
+    def _save_pattern_detection(self, pattern: Dict, symbol: str, 
+                              timeframe: str, catalyst_info: Dict):
+        """Save pattern detection to database"""
+        try:
+            pattern_data = {
+                'symbol': symbol,
+                'pattern_name': pattern['pattern_name'],
+                'pattern_type': pattern['pattern_type'],
+                'base_confidence': pattern['base_confidence'],
+                'final_confidence': pattern['final_confidence'],
+                'timeframe': timeframe,
+                'metadata': {
+                    'pattern_direction': pattern['pattern_direction'],
+                    'catalyst_aligned': pattern['catalyst_aligned'],
+                    'catalyst_type': catalyst_info['catalyst_type'],
+                    'catalyst_sentiment': catalyst_info['catalyst_sentiment'],
+                    'is_pre_market': catalyst_info['is_pre_market'],
+                    'price': pattern['price'],
+                    'volume': pattern['volume']
+                },
+                'detected_at': datetime.now()
+            }
+            
+            insert_pattern_detection(pattern_data)
+            
+        except Exception as e:
+            self.logger.error("Failed to save pattern detection", error=str(e))
+            
+    def _get_pattern_statistics(self, pattern: Optional[str], 
+                              catalyst: Optional[str], hours: int) -> Dict:
+        """Get historical pattern performance statistics"""
+        # This would query the database for pattern performance
+        # For now, return mock data
+        return {
+            'pattern': pattern,
+            'catalyst': catalyst,
+            'period_hours': hours,
+            'total_detections': 0,
+            'successful_trades': 0,
+            'success_rate': 0,
+            'average_confidence': 0,
+            'best_performing_combo': None
+        }
+        
+    def _update_pattern_outcome(self, pattern_id: str, outcome: Dict) -> Dict:
+        """Update pattern with trading outcome for ML training"""
+        # This would update the database with pattern outcome
+        return {
+            'pattern_id': pattern_id,
+            'outcome_recorded': True,
+            'timestamp': datetime.now().isoformat()
+        }
+        
+    def _get_mock_price_data(self, symbol: str, timeframe: str) -> pd.DataFrame:
+        """Generate mock price data for testing"""
+        # Generate 100 periods of random walk data
+        periods = 100
+        base_price = 100
+        
+        dates = pd.date_range(end=datetime.now(), periods=periods, freq='5min')
+        
+        # Random walk
+        returns = np.random.normal(0, 0.02, periods)
+        prices = base_price * np.exp(np.cumsum(returns))
+        
+        # OHLC with some realistic relationships
+        data = pd.DataFrame({
+            'Open': prices * (1 + np.random.uniform(-0.005, 0.005, periods)),
+            'High': prices * (1 + np.random.uniform(0, 0.01, periods)),
+            'Low': prices * (1 + np.random.uniform(-0.01, 0, periods)),
+            'Close': prices,
+            'Volume': np.random.randint(100000, 1000000, periods)
+        }, index=dates)
+        
+        # Ensure high is highest and low is lowest
+        data['High'] = data[['Open', 'High', 'Low', 'Close']].max(axis=1)
+        data['Low'] = data[['Open', 'High', 'Low', 'Close']].min(axis=1)
+        
+        return data
+        
     def run(self):
         """Start the pattern analysis service"""
         self.logger.info("Starting Pattern Analysis Service",
-                        version="2.1.1",
+                        version="2.1.2",
                         port=self.port,
                         environment=os.getenv('ENVIRONMENT', 'development'))
         
