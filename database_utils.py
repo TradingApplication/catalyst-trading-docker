@@ -2,13 +2,13 @@
 """
 Name of Application: Catalyst Trading System
 Name of file: database_utils.py
-Version: 2.3.1
+Version: 2.3.2
 Last Updated: 2025-07-05
 Purpose: Centralized database connection management for all services
 
 REVISION HISTORY:
 v2.3.2 (2025-07-05) - Added remaining missing functions for all services
- - Add get_logger
+ - Added extra functions
 
 v2.3.1 (2025-07-05) - Added remaining missing functions for all services
 - Added get_recent_news() for news service
@@ -891,3 +891,246 @@ def get_logger():
     import structlog
     return structlog.get_logger()
 
+# =============================================================================
+# TRADING CANDIDATE FUNCTIONS - Add these to database_utils.py v2.31
+# =============================================================================
+
+def insert_trading_candidates(candidates: List[Dict], scan_id: str) -> int:
+    """
+    Insert trading candidates into the database
+    
+    Args:
+        candidates: List of candidate dictionaries with symbol, scores, etc.
+        scan_id: Unique identifier for this scan
+        
+    Returns:
+        Number of candidates inserted
+    """
+    inserted_count = 0
+    
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                # Create table if it doesn't exist
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS trading_candidates (
+                        id SERIAL PRIMARY KEY,
+                        scan_id VARCHAR(50) NOT NULL,
+                        symbol VARCHAR(10) NOT NULL,
+                        price DECIMAL(10,2),
+                        volume BIGINT,
+                        relative_volume DECIMAL(5,2),
+                        price_change_pct DECIMAL(5,2),
+                        catalyst_score INTEGER,
+                        technical_score INTEGER,
+                        news_count INTEGER,
+                        catalysts JSONB,
+                        primary_catalyst VARCHAR(100),
+                        sector VARCHAR(50),
+                        market_cap BIGINT,
+                        status VARCHAR(20) DEFAULT 'active',
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+                
+                # Create indexes if they don't exist
+                cur.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_candidates_scan_id 
+                    ON trading_candidates(scan_id)
+                """)
+                cur.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_candidates_symbol 
+                    ON trading_candidates(symbol)
+                """)
+                cur.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_candidates_status 
+                    ON trading_candidates(status)
+                """)
+                cur.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_candidates_created 
+                    ON trading_candidates(created_at DESC)
+                """)
+                
+                # Insert candidates
+                for candidate in candidates:
+                    cur.execute("""
+                        INSERT INTO trading_candidates (
+                            scan_id, symbol, price, volume, relative_volume,
+                            price_change_pct, catalyst_score, technical_score,
+                            news_count, catalysts, primary_catalyst, sector, 
+                            market_cap, status
+                        ) VALUES (
+                            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                        )
+                    """, (
+                        scan_id,
+                        candidate.get('symbol'),
+                        candidate.get('price'),
+                        candidate.get('volume'),
+                        candidate.get('relative_volume'),
+                        candidate.get('price_change_pct'),
+                        candidate.get('catalyst_score', 0),
+                        candidate.get('technical_score', 0),
+                        candidate.get('news_count', 0),
+                        json.dumps(candidate.get('catalysts', [])),
+                        candidate.get('primary_catalyst'),
+                        candidate.get('sector'),
+                        candidate.get('market_cap'),
+                        'active'
+                    ))
+                    inserted_count += 1
+                
+                conn.commit()
+                logger.info(f"Inserted {inserted_count} trading candidates", scan_id=scan_id)
+                
+    except Exception as e:
+        logger.error("Failed to insert trading candidates", error=str(e))
+        raise DatabaseError(f"Failed to insert candidates: {str(e)}")
+    
+    return inserted_count
+
+
+def get_active_candidates(limit: int = 10) -> List[Dict]:
+    """
+    Get active trading candidates
+    
+    Args:
+        limit: Maximum number of candidates to return
+        
+    Returns:
+        List of candidate dictionaries
+    """
+    candidates = []
+    
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                # Get most recent active candidates
+                cur.execute("""
+                    SELECT 
+                        scan_id, symbol, price, volume, relative_volume,
+                        price_change_pct, catalyst_score, technical_score,
+                        news_count, catalysts, primary_catalyst, sector,
+                        market_cap, status, created_at
+                    FROM trading_candidates
+                    WHERE status = 'active'
+                    AND created_at >= CURRENT_TIMESTAMP - INTERVAL '24 hours'
+                    ORDER BY created_at DESC, catalyst_score DESC
+                    LIMIT %s
+                """, (limit,))
+                
+                rows = cur.fetchall()
+                
+                for row in rows:
+                    candidate = dict(row)
+                    # Convert datetime to ISO format string
+                    if candidate.get('created_at'):
+                        candidate['created_at'] = candidate['created_at'].isoformat()
+                    candidates.append(candidate)
+                
+                logger.info(f"Retrieved {len(candidates)} active candidates")
+                
+    except Exception as e:
+        logger.error("Failed to get active candidates", error=str(e))
+        # Return empty list instead of raising to avoid breaking the service
+        return []
+    
+    return candidates
+
+
+def update_candidate_status(symbol: str, status: str, scan_id: Optional[str] = None) -> bool:
+    """
+    Update the status of a trading candidate
+    
+    Args:
+        symbol: Stock symbol
+        status: New status (e.g., 'traded', 'expired', 'cancelled')
+        scan_id: Optional scan ID to update specific scan
+        
+    Returns:
+        True if updated successfully, False otherwise
+    """
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                if scan_id:
+                    cur.execute("""
+                        UPDATE trading_candidates
+                        SET status = %s, updated_at = CURRENT_TIMESTAMP
+                        WHERE symbol = %s AND scan_id = %s
+                    """, (status, symbol, scan_id))
+                else:
+                    # Update most recent entry for this symbol
+                    cur.execute("""
+                        UPDATE trading_candidates
+                        SET status = %s, updated_at = CURRENT_TIMESTAMP
+                        WHERE symbol = %s AND status = 'active'
+                        ORDER BY created_at DESC
+                        LIMIT 1
+                    """, (status, symbol))
+                
+                updated = cur.rowcount > 0
+                conn.commit()
+                
+                if updated:
+                    logger.info(f"Updated candidate status", symbol=symbol, status=status)
+                
+                return updated
+                
+    except Exception as e:
+        logger.error("Failed to update candidate status", error=str(e))
+        return False
+
+
+def insert_pattern_detection(pattern_data: Dict) -> bool:
+    """
+    Insert pattern detection results into the database
+    
+    Args:
+        pattern_data: Dictionary containing pattern detection results
+        
+    Returns:
+        True if inserted successfully, False otherwise
+    """
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                # Create table if it doesn't exist
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS pattern_detections (
+                        id SERIAL PRIMARY KEY,
+                        symbol VARCHAR(10) NOT NULL,
+                        pattern_type VARCHAR(50),
+                        pattern_name VARCHAR(100),
+                        confidence DECIMAL(5,2),
+                        catalyst_alignment VARCHAR(20),
+                        news_sentiment VARCHAR(20),
+                        detection_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        metadata JSONB
+                    )
+                """)
+                
+                # Insert pattern detection
+                cur.execute("""
+                    INSERT INTO pattern_detections (
+                        symbol, pattern_type, pattern_name, confidence,
+                        catalyst_alignment, news_sentiment, metadata
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                """, (
+                    pattern_data.get('symbol'),
+                    pattern_data.get('pattern_type'),
+                    pattern_data.get('pattern_name'),
+                    pattern_data.get('confidence'),
+                    pattern_data.get('catalyst_alignment'),
+                    pattern_data.get('news_sentiment'),
+                    json.dumps(pattern_data.get('metadata', {}))
+                ))
+                
+                conn.commit()
+                logger.info("Inserted pattern detection", symbol=pattern_data.get('symbol'))
+                return True
+                
+    except Exception as e:
+        logger.error("Failed to insert pattern detection", error=str(e))
+        return False
