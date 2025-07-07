@@ -632,6 +632,38 @@ def create_tables():
             exit_time TIMESTAMP,
             metadata JSONB
         )
+        """,
+        
+        # News tables
+        """
+        CREATE TABLE IF NOT EXISTS news_raw (
+            id SERIAL PRIMARY KEY,
+            symbol VARCHAR(10),
+            headline TEXT,
+            description TEXT,
+            summary TEXT,
+            url TEXT,
+            source VARCHAR(100),
+            author VARCHAR(100),
+            published_at TIMESTAMP,
+            collected_timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            sentiment_score FLOAT,
+            relevance_score FLOAT,
+            keywords TEXT,
+            category VARCHAR(50)
+        )
+        """,
+        
+        """
+        CREATE TABLE IF NOT EXISTS news_collection_stats (
+            id SERIAL PRIMARY KEY,
+            source VARCHAR(100),
+            collection_date DATE DEFAULT CURRENT_DATE,
+            symbol VARCHAR(10),
+            articles_collected INTEGER DEFAULT 0,
+            articles_processed INTEGER DEFAULT 0,
+            last_collection TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
         """
     ]
     
@@ -640,6 +672,21 @@ def create_tables():
             with conn.cursor() as cur:
                 for table_sql in tables:
                     cur.execute(table_sql)
+                
+                # Create indexes
+                indexes = [
+                    "CREATE INDEX IF NOT EXISTS idx_candidates_scan_id ON trading_candidates(scan_id)",
+                    "CREATE INDEX IF NOT EXISTS idx_candidates_symbol ON trading_candidates(symbol)",
+                    "CREATE INDEX IF NOT EXISTS idx_candidates_status ON trading_candidates(status)",
+                    "CREATE INDEX IF NOT EXISTS idx_candidates_created ON trading_candidates(created_at DESC)",
+                    "CREATE INDEX IF NOT EXISTS idx_news_symbol ON news_raw(symbol)",
+                    "CREATE INDEX IF NOT EXISTS idx_news_published ON news_raw(published_at DESC)",
+                    "CREATE INDEX IF NOT EXISTS idx_news_collected ON news_raw(collected_timestamp DESC)"
+                ]
+                
+                for index_sql in indexes:
+                    cur.execute(index_sql)
+                
                 conn.commit()
                 logger.info("All tables created successfully")
     except Exception as e:
