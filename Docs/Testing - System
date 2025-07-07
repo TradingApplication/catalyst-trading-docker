@@ -3,7 +3,9 @@
 #Clear Docker Build caches
 docker builder prune -a
 
-
+# ===============================================
+# Building 
+# ===============================================
 
 
 # Remove all Docker cache, images, and build cache
@@ -15,6 +17,16 @@ docker builder prune -a -f
 # Now build with no cache
 docker-compose build --no-cache --pull
 
+
+# Build the coordination service
+docker-compose build coordination-service
+
+# Build the coordination service
+docker-compose build pattern-service technical-service
+
+# ===============================================
+# Starting 
+# ===============================================
 
 # Staring System
 docker-compose up -d
