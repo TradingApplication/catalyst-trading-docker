@@ -7,9 +7,6 @@ Last Updated: 2025-07-05
 Purpose: Centralized database connection management for all services
 
 REVISION HISTORY:
-v2.3.2 (2025-07-05) - Added remaining missing functions for all services
- - Add get_logger
-
 v2.3.1 (2025-07-05) - Added remaining missing functions for all services
 - Added get_recent_news() for news service
 - Added insert_pattern_detection() as alias for pattern service
@@ -886,8 +883,3 @@ try:
 except Exception as e:
     logger.warning("Failed to initialize database utilities on import", error=str(e))
     # Don't raise here - let services handle initialization in their __init__
-# Add get_logger function
-def get_logger():
-    import structlog
-    return structlog.get_logger()
-
