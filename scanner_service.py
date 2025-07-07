@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """
-Name of Application: Catalyst Trading System  
+Name of Application: Catalyst Trading System
 Name of file: scanner_service.py
-Version: 2.1.1
-Last Updated: 2025-07-06
-Purpose: Dynamic security scanning with news-based filtering and PostgreSQL
+Version: 2.2.0
+Last Updated: 2025-07-07
+Purpose: Enhanced dynamic security scanning with top 100 tracking
 
 REVISION HISTORY:
-v2.1.1 (2025-07-06) - Fixed missing database function imports
-- Added insert_trading_candidates function implementation
-- Added get_active_candidates function implementation
-- Maintained backward compatibility with v2.1.0
+v2.2.0 (2025-07-07) - Enhanced data collection implementation
+- Track top 100 securities (not just top 5)
+- Intelligent data aging system
+- Pattern discovery preparation
+- Storage optimization with tiered collection
 
 v2.1.0 (2025-07-01) - Production-ready refactor
 - Migrated from SQLite to PostgreSQL
@@ -33,6 +34,7 @@ This scanner finds the best day trading opportunities by:
 2. Filtering by news catalysts
 3. Confirming with technical setups
 4. Delivering top 5 high-conviction picks
+5. NEW: Tracking top 100 for pattern discovery
 """
 
 import os
@@ -48,10 +50,13 @@ from typing import Dict, List, Optional, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from structlog import get_logger
 import redis
+import threading
 
-# Import only available database utilities
+# Import database utilities
 from database_utils import (
     get_db_connection,
+    insert_trading_candidates,
+    get_active_candidates,
     get_redis,
     health_check
 )
@@ -64,98 +69,10 @@ except ImportError as e:
     YFINANCE_AVAILABLE = False
     print(f"⚠️ yfinance not available: {e}")
 
-# Database functions that are missing from database_utils.py
-def insert_trading_candidates(candidates: List[Dict], scan_id: str = None) -> int:
-    """Insert trading candidates into database"""
-    if not candidates:
-        return 0
-        
-    conn = None
-    inserted = 0
-    try:
-        conn = get_db_connection()
-        with conn.cursor() as cur:
-            for candidate in candidates:
-                try:
-                    cur.execute("""
-                        INSERT INTO trading_candidates (
-                            symbol, scan_timestamp, score, price, volume,
-                            relative_volume, price_change_pct, market_cap,
-                            news_sentiment, news_count, pattern_strength,
-                            technical_rating, sector, industry, metadata,
-                            scan_id
-                        ) VALUES (
-                            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
-                        ) ON CONFLICT (symbol, scan_timestamp) DO UPDATE
-                        SET score = EXCLUDED.score,
-                            price = EXCLUDED.price,
-                            volume = EXCLUDED.volume,
-                            relative_volume = EXCLUDED.relative_volume,
-                            news_sentiment = EXCLUDED.news_sentiment,
-                            news_count = EXCLUDED.news_count
-                    """, (
-                        candidate.get('symbol'),
-                        candidate.get('scan_timestamp', datetime.utcnow()),
-                        candidate.get('score', 0),
-                        candidate.get('price'),
-                        candidate.get('volume'),
-                        candidate.get('relative_volume'),
-                        candidate.get('price_change_pct'),
-                        candidate.get('market_cap'),
-                        candidate.get('news_sentiment'),
-                        candidate.get('news_count', 0),
-                        candidate.get('pattern_strength'),
-                        candidate.get('technical_rating'),
-                        candidate.get('sector'),
-                        candidate.get('industry'),
-                        json.dumps(candidate.get('metadata', {})),
-                        scan_id
-                    ))
-                    inserted += 1
-                except Exception as e:
-                    print(f"Failed to insert candidate {candidate.get('symbol')}: {e}")
-            
-            conn.commit()
-            
-    except Exception as e:
-        if conn:
-            conn.rollback()
-        print(f"Failed to insert trading candidates: {e}")
-        
-    finally:
-        if conn:
-            conn.close()
-            
-    return inserted
 
-def get_active_candidates(limit: int = 20) -> List[Dict]:
-    """Get active trading candidates from the last scan"""
-    conn = None
-    try:
-        conn = get_db_connection()
-        with conn.cursor() as cur:
-            cur.execute("""
-                SELECT * FROM trading_candidates
-                WHERE scan_timestamp > NOW() - INTERVAL '30 minutes'
-                ORDER BY score DESC
-                LIMIT %s
-            """, (limit,))
-            
-            candidates = cur.fetchall()
-            return candidates if candidates else []
-            
-    except Exception as e:
-        print(f"Failed to get active candidates: {e}")
-        return []
-        
-    finally:
-        if conn:
-            conn.close()
-
-
-class DynamicSecurityScanner:
+class EnhancedSecurityScanner:
     """
-    Enhanced security scanner that dynamically finds trading opportunities
+    Enhanced security scanner that tracks top 100 for pattern discovery
     """
     
     def __init__(self):
@@ -173,11 +90,15 @@ class DynamicSecurityScanner:
         self.coordination_url = os.getenv('COORDINATION_URL', 'http://coordination-service:5000')
         self.news_service_url = os.getenv('NEWS_SERVICE_URL', 'http://news-service:5008')
         
-        # Scanning parameters from environment
+        # Enhanced scanning parameters
         self.scan_params = {
-            # Universe size at each stage
-            'initial_universe_size': int(os.getenv('INITIAL_UNIVERSE_SIZE', '100')),
-            'catalyst_filter_size': int(os.getenv('CATALYST_FILTER_SIZE', '20')),
+            # NEW: Track more securities
+            'track_top_n': int(os.getenv('TRACK_TOP_N', '100')),  # Track top 100
+            'trade_top_n': int(os.getenv('TRADE_TOP_N', '5')),    # Trade top 5
+            
+            # Universe sizing
+            'initial_universe_size': int(os.getenv('INITIAL_UNIVERSE_SIZE', '500')),
+            'catalyst_filter_size': int(os.getenv('CATALYST_FILTER_SIZE', '100')),
             'final_selection_size': int(os.getenv('FINAL_SELECTION_SIZE', '5')),
             
             # Technical criteria
@@ -192,59 +113,41 @@ class DynamicSecurityScanner:
             'premarket_weight': float(os.getenv('PREMARKET_WEIGHT', '2.0')),
             
             # Cache settings
-            'cache_ttl': int(os.getenv('SCANNER_CACHE_TTL', '300')),  # 5 minutes
-            'concurrent_requests': int(os.getenv('SCANNER_CONCURRENT', '10'))
+            'cache_ttl': int(os.getenv('SCANNER_CACHE_TTL', '300'))  # 5 minutes
         }
         
-        # Default stock universe (expanded)
-        self.default_universe = [
-            # Tech giants
-            'AAPL', 'MSFT', 'GOOGL', 'AMZN', 'META', 'NVDA', 'TSLA', 'AMD', 'INTC', 'CRM',
-            'ORCL', 'CSCO', 'ADBE', 'NFLX', 'PYPL', 'UBER', 'SNAP', 'SQ', 'SHOP', 'ROKU',
-            
-            # Financial
-            'JPM', 'BAC', 'WFC', 'GS', 'MS', 'C', 'AXP', 'V', 'MA', 'BLK',
-            
-            # Healthcare
-            'JNJ', 'PFE', 'UNH', 'CVS', 'ABBV', 'MRK', 'TMO', 'ABT', 'LLY', 'GILD',
-            
-            # Energy
-            'XOM', 'CVX', 'COP', 'SLB', 'OXY', 'MRO', 'HAL', 'DVN', 'APA', 'EOG',
-            
-            # Consumer
-            'WMT', 'HD', 'PG', 'KO', 'PEP', 'MCD', 'NKE', 'SBUX', 'DIS', 'COST',
-            
-            # ETFs for market sentiment
-            'SPY', 'QQQ', 'IWM', 'DIA', 'VXX', 'GLD', 'SLV', 'USO', 'TLT', 'HYG'
-        ]
+        # NEW: Tracking state for top 100
+        self.tracked_securities = {}  # symbol -> tracking_info
+        self.tracking_lock = threading.Lock()
         
-        # Cache for scan results
-        self.scan_cache = {
-            'timestamp': None,
-            'universe': [],
-            'catalyst_filtered': [],
-            'final_picks': []
+        # Data collection frequencies
+        self.collection_frequencies = {
+            'ultra_high': timedelta(minutes=1),    # Breaking news/high volatility
+            'high': timedelta(minutes=15),         # Active tracking
+            'medium': timedelta(hours=1),          # Normal tracking
+            'low': timedelta(hours=6),             # Aging securities
+            'archive': timedelta(days=1)           # Historical only
         }
         
         # Register with coordination
         self._register_with_coordination()
         
-        self.logger.info("Dynamic Security Scanner v2.1.1 initialized",
+        # Start background tracking thread
+        self._start_tracking_thread()
+        
+        self.logger.info("Enhanced Security Scanner v2.2.0 initialized",
                         environment=os.getenv('ENVIRONMENT', 'development'),
-                        universe_size=len(self.default_universe))
+                        track_top_n=self.scan_params['track_top_n'])
         
     def setup_environment(self):
         """Setup environment variables and paths"""
-        # Paths
         self.log_path = os.getenv('LOG_PATH', '/app/logs')
         self.data_path = os.getenv('DATA_PATH', '/app/data')
         
-        # Create directories
         os.makedirs(self.log_path, exist_ok=True)
         os.makedirs(self.data_path, exist_ok=True)
         
-        # Service configuration
-        self.service_name = 'security_scanner'
+        self.service_name = 'scanner_service'
         self.port = int(os.getenv('PORT', '5001'))
         self.log_level = os.getenv('LOG_LEVEL', 'INFO')
         
@@ -257,324 +160,457 @@ class DynamicSecurityScanner:
         """Setup Flask routes"""
         @self.app.route('/health', methods=['GET'])
         def health():
+            """Health check endpoint"""
             db_health = health_check()
+            
+            # Handle different database_utils versions
+            db_status = False
+            redis_status = False
+            
+            if 'postgresql' in db_health:
+                db_status = db_health['postgresql'].get('status') == 'healthy'
+                redis_status = db_health['redis'].get('status') == 'healthy'
+            elif 'database' in db_health:
+                db_status = db_health['database']
+                redis_status = db_health['redis']
+            
             return jsonify({
-                "status": "healthy",
-                "service": "scanner",
-                "version": "2.1.1",
-                "mode": "dynamic",
-                "database": db_health.get('postgresql', {}).get('status', 'unknown'),
-                "redis": db_health.get('redis', {}).get('status', 'unknown'),
-                "timestamp": datetime.now().isoformat(),
-                "yfinance": YFINANCE_AVAILABLE
+                "status": "healthy" if db_status else "degraded",
+                "service": self.service_name,
+                "version": "2.2.0",
+                "database": db_status,
+                "redis": redis_status,
+                "tracking_count": len(self.tracked_securities),
+                "timestamp": datetime.now().isoformat()
             })
             
-        @self.app.route('/scan', methods=['POST'])
+        @self.app.route('/scan', methods=['GET'])
         def scan():
-            """Run a security scan"""
-            try:
-                data = request.json or {}
-                mode = data.get('mode', 'normal')
-                force_refresh = data.get('force_refresh', False)
-                
-                # Check cache unless forced refresh
-                if not force_refresh and self._is_cache_valid():
-                    self.logger.info("Returning cached scan results")
-                    return jsonify({
-                        'status': 'success',
-                        'source': 'cache',
-                        'final_picks': self.scan_cache['final_picks']
-                    })
-                
-                # Run the scan
-                results = self.run_dynamic_scan(mode)
-                
-                return jsonify({
-                    'status': 'success',
-                    'source': 'fresh',
-                    'scan_timestamp': datetime.now().isoformat(),
-                    'mode': mode,
-                    'universe_size': len(results['universe']),
-                    'catalyst_filtered': len(results['catalyst_filtered']),
-                    'final_picks': results['final_picks']
-                })
-                
-            except Exception as e:
-                self.logger.error("Scan failed", error=str(e))
-                return jsonify({
-                    'status': 'error',
-                    'error': str(e)
-                }), 500
-                
-        @self.app.route('/candidates', methods=['GET'])
-        def get_candidates():
-            """Get active trading candidates"""
-            try:
-                limit = int(request.args.get('limit', 20))
-                candidates = get_active_candidates(limit)
-                
-                return jsonify({
-                    'status': 'success',
-                    'count': len(candidates),
-                    'candidates': candidates
-                })
-                
-            except Exception as e:
-                self.logger.error("Failed to get candidates", error=str(e))
-                return jsonify({
-                    'status': 'error',
-                    'error': str(e)
-                }), 500
-    
-    def run_dynamic_scan(self, mode: str = 'normal') -> Dict:
+            """Regular market scan - now returns top 100 for tracking"""
+            mode = request.args.get('mode', 'normal')
+            results = self.scan_market(mode)
+            return jsonify(results)
+            
+        @self.app.route('/scan_premarket', methods=['GET'])
+        def scan_premarket():
+            """Pre-market aggressive scan"""
+            results = self.scan_market('aggressive')
+            return jsonify(results)
+            
+        @self.app.route('/tracked_securities', methods=['GET'])
+        def get_tracked():
+            """Get list of all tracked securities"""
+            with self.tracking_lock:
+                tracked = [
+                    {
+                        'symbol': symbol,
+                        'tracking_since': info['first_seen'].isoformat(),
+                        'frequency': info['collection_frequency'],
+                        'data_points': info['data_points_collected'],
+                        'last_update': info['last_updated'].isoformat()
+                    }
+                    for symbol, info in self.tracked_securities.items()
+                ]
+            return jsonify({
+                'count': len(tracked),
+                'securities': tracked
+            })
+            
+        @self.app.route('/tracking_stats', methods=['GET'])
+        def tracking_stats():
+            """Get tracking statistics"""
+            stats = self._calculate_tracking_stats()
+            return jsonify(stats)
+            
+    def scan_market(self, mode: str = 'normal') -> Dict:
         """
-        Run the complete dynamic scanning workflow
+        Enhanced market scan that tracks top 100 securities
         """
-        self.logger.info("Starting dynamic scan", mode=mode)
-        scan_id = f"SCAN_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{mode}"
+        self.logger.info("Starting enhanced market scan",
+                        mode=mode,
+                        track_top_n=self.scan_params['track_top_n'])
         
-        # Stage 1: Build universe (50-100 stocks)
-        universe = self._build_dynamic_universe(mode)
-        self.logger.info("Universe built", size=len(universe))
+        scan_start = time.time()
         
-        # Stage 2: Filter by catalyst (narrow to ~20)
-        catalyst_filtered = self._filter_by_catalyst(universe)
-        self.logger.info("Catalyst filter applied", 
-                        before=len(universe), 
-                        after=len(catalyst_filtered))
+        # 1. Get news-mentioned securities
+        news_securities = self._get_news_mentioned_securities()
+        self.logger.info(f"Found {len(news_securities)} securities with news")
         
-        # Stage 3: Score and rank (select top 5)
-        final_picks = self._score_and_select(catalyst_filtered, mode)
-        self.logger.info("Final selection complete", picks=len(final_picks))
+        # 2. Get market movers
+        market_movers = self._get_market_movers()
         
-        # Cache results
-        self.scan_cache = {
-            'timestamp': datetime.now(),
-            'universe': universe,
-            'catalyst_filtered': catalyst_filtered,
-            'final_picks': final_picks
-        }
+        # 3. Combine and deduplicate
+        all_candidates = list(set(news_securities + market_movers))
+        self.logger.info(f"Total candidates to evaluate: {len(all_candidates)}")
         
-        # Save to database
-        if final_picks:
-            saved = insert_trading_candidates(final_picks, scan_id)
-            self.logger.info("Candidates saved to database", count=saved)
+        # 4. Score all candidates
+        scored_candidates = self._score_candidates(all_candidates, mode)
+        
+        # 5. Get top 100 for tracking (NEW)
+        top_100 = scored_candidates[:self.scan_params['track_top_n']]
+        top_5_trading = scored_candidates[:self.scan_params['trade_top_n']]
+        
+        # 6. Start tracking all top 100
+        for candidate in top_100:
+            self._start_tracking_security(candidate)
+        
+        # 7. Store results
+        self._store_scan_results(top_100, top_5_trading)
+        
+        scan_time = time.time() - scan_start
         
         return {
-            'universe': universe,
-            'catalyst_filtered': catalyst_filtered,
-            'final_picks': final_picks
+            'timestamp': datetime.now().isoformat(),
+            'mode': mode,
+            'scan_time_seconds': round(scan_time, 2),
+            'total_evaluated': len(all_candidates),
+            'tracking_candidates': top_100,      # NEW: All 100 for data collection
+            'trading_candidates': top_5_trading,  # Top 5 for actual trading
+            'tracked_securities_total': len(self.tracked_securities)
         }
-    
-    def _build_dynamic_universe(self, mode: str) -> List[Dict]:
-        """
-        Build dynamic universe based on market conditions
-        """
-        universe = []
         
-        # For testing/development, use mock data if yfinance not available
-        if not YFINANCE_AVAILABLE:
-            self.logger.warning("Using mock data - yfinance not available")
-            for symbol in self.default_universe[:self.scan_params['initial_universe_size']]:
-                universe.append(self._get_mock_symbol_data(symbol))
-            return universe
+    def _start_tracking_security(self, candidate: Dict):
+        """Start or update tracking for a security"""
+        symbol = candidate['symbol']
         
-        # Real implementation would:
-        # 1. Get market movers
-        # 2. Get high volume stocks
-        # 3. Get gapping stocks (pre-market)
-        # 4. Combine and deduplicate
-        
-        # For now, scan default universe
-        with ThreadPoolExecutor(max_workers=self.scan_params['concurrent_requests']) as executor:
-            futures = {executor.submit(self._get_symbol_data, symbol): symbol 
-                      for symbol in self.default_universe}
-            
-            for future in as_completed(futures):
-                try:
-                    data = future.result()
-                    if data and self._meets_basic_criteria(data, mode):
-                        universe.append(data)
-                        
-                    # Stop when we have enough
-                    if len(universe) >= self.scan_params['initial_universe_size']:
-                        break
-                        
-                except Exception as e:
-                    symbol = futures[future]
-                    self.logger.debug(f"Failed to get data for {symbol}: {e}")
-        
-        return universe
-    
-    def _get_symbol_data(self, symbol: str) -> Optional[Dict]:
-        """Get current data for a symbol"""
+        with self.tracking_lock:
+            if symbol in self.tracked_securities:
+                # Update existing tracking
+                tracking_info = self.tracked_securities[symbol]
+                tracking_info['last_catalyst_score'] = candidate['score']
+                tracking_info['catalyst_events'].append({
+                    'timestamp': datetime.now(),
+                    'score': candidate['score'],
+                    'catalyst_type': candidate.get('catalyst_type'),
+                    'news_count': candidate.get('news_count', 0)
+                })
+                
+                # Potentially increase collection frequency
+                if candidate['score'] > 80:
+                    tracking_info['collection_frequency'] = 'high'
+                    
+            else:
+                # New security to track
+                self.tracked_securities[symbol] = {
+                    'symbol': symbol,
+                    'first_seen': datetime.now(),
+                    'last_updated': datetime.now(),
+                    'collection_frequency': 'high' if candidate['score'] > 70 else 'medium',
+                    'data_points_collected': 0,
+                    'catalyst_events': [{
+                        'timestamp': datetime.now(),
+                        'score': candidate['score'],
+                        'catalyst_type': candidate.get('catalyst_type'),
+                        'news_count': candidate.get('news_count', 0)
+                    }],
+                    'last_catalyst_score': candidate['score'],
+                    'flatline_periods': 0,
+                    'last_price': None,
+                    'last_volume': None
+                }
+                
+                self.logger.info(f"Started tracking {symbol}",
+                               score=candidate['score'],
+                               frequency=self.tracked_securities[symbol]['collection_frequency'])
+                
+    def _collect_security_data(self, symbol: str, tracking_info: Dict):
+        """Collect comprehensive data for a tracked security"""
         try:
+            # Get price and volume data
             ticker = yf.Ticker(symbol)
-            info = ticker.info
+            hist = ticker.history(period='1d', interval='15m')
             
-            # Get current price and volume
-            history = ticker.history(period='1d', interval='1m')
-            if history.empty:
+            if hist.empty:
                 return None
                 
-            current_price = history['Close'].iloc[-1]
-            current_volume = history['Volume'].sum()
+            current_price = hist['Close'].iloc[-1]
+            current_volume = hist['Volume'].iloc[-1]
+            avg_volume = hist['Volume'].mean()
             
             # Calculate metrics
-            price_change = current_price - info.get('previousClose', current_price)
-            price_change_pct = (price_change / info.get('previousClose', 1)) * 100
+            price_change = 0
+            if tracking_info['last_price']:
+                price_change = (current_price - tracking_info['last_price']) / tracking_info['last_price']
+                
+            volume_ratio = current_volume / avg_volume if avg_volume > 0 else 1
             
-            return {
+            # Determine if flatlined
+            is_flatlined = abs(price_change) < 0.001 and volume_ratio < 0.5
+            
+            # Store data based on frequency
+            data = {
                 'symbol': symbol,
+                'timestamp': datetime.now(),
                 'price': current_price,
                 'volume': current_volume,
-                'avg_volume': info.get('averageVolume', 0),
-                'relative_volume': current_volume / max(info.get('averageVolume', 1), 1),
                 'price_change': price_change,
-                'price_change_pct': price_change_pct,
-                'market_cap': info.get('marketCap', 0),
-                'sector': info.get('sector', 'Unknown'),
-                'industry': info.get('industry', 'Unknown'),
-                'timestamp': datetime.now().isoformat()
+                'volume_ratio': volume_ratio,
+                'frequency': tracking_info['collection_frequency'],
+                'rsi': self._calculate_rsi(hist['Close'].values),
+                'vwap': self._calculate_vwap(hist),
+                'catalyst_score': tracking_info['last_catalyst_score']
             }
             
+            # Store in database
+            self._store_security_data(data)
+            
+            # Update tracking info
+            tracking_info['last_updated'] = datetime.now()
+            tracking_info['data_points_collected'] += 1
+            tracking_info['last_price'] = current_price
+            tracking_info['last_volume'] = current_volume
+            
+            if is_flatlined:
+                tracking_info['flatline_periods'] += 1
+            else:
+                tracking_info['flatline_periods'] = 0
+                
+            # Age the security if needed
+            self._check_aging_criteria(symbol, tracking_info, is_flatlined)
+            
+            return data
+            
         except Exception as e:
-            self.logger.debug(f"Error getting data for {symbol}: {e}")
+            self.logger.error(f"Error collecting data for {symbol}", error=str(e))
             return None
-    
-    def _meets_basic_criteria(self, data: Dict, mode: str) -> bool:
-        """Check if symbol meets basic scanning criteria"""
-        # Price criteria
-        if data['price'] < self.scan_params['min_price'] or data['price'] > self.scan_params['max_price']:
-            return False
             
-        # Volume criteria
-        min_volume = (self.scan_params['premarket_min_volume'] 
-                     if mode == 'premarket' 
-                     else self.scan_params['min_volume'])
+    def _check_aging_criteria(self, symbol: str, tracking_info: Dict, is_flatlined: bool):
+        """Determine if security should change collection frequency"""
+        current_freq = tracking_info['collection_frequency']
+        hours_since_catalyst = (datetime.now() - tracking_info['catalyst_events'][-1]['timestamp']).total_seconds() / 3600
         
-        if data['volume'] < min_volume:
-            return False
+        # Promotion criteria (increase frequency)
+        if tracking_info['last_catalyst_score'] > 80 and current_freq != 'high':
+            tracking_info['collection_frequency'] = 'high'
+            self.logger.info(f"Promoted {symbol} to high frequency")
             
-        # Relative volume
-        if data['relative_volume'] < self.scan_params['min_relative_volume']:
-            return False
+        # Demotion criteria (decrease frequency)
+        elif is_flatlined and tracking_info['flatline_periods'] > 4:
+            if current_freq == 'high':
+                tracking_info['collection_frequency'] = 'medium'
+            elif current_freq == 'medium':
+                tracking_info['collection_frequency'] = 'low'
+            self.logger.info(f"Demoted {symbol} to {tracking_info['collection_frequency']} frequency")
             
-        # Price movement
-        if abs(data['price_change_pct']) < self.scan_params['min_price_change']:
-            return False
+        # Old catalyst decay
+        elif hours_since_catalyst > 48 and current_freq == 'high':
+            tracking_info['collection_frequency'] = 'medium'
             
-        return True
-    
-    def _filter_by_catalyst(self, universe: List[Dict]) -> List[Dict]:
-        """Filter universe by news catalysts"""
-        catalyst_filtered = []
+        # Archive very old securities
+        elif hours_since_catalyst > 168 and current_freq != 'archive':  # 1 week
+            tracking_info['collection_frequency'] = 'archive'
+            self.logger.info(f"Archived {symbol}")
+            
+    def _store_security_data(self, data: Dict):
+        """Store security data in appropriate table based on frequency"""
+        try:
+            with get_db_connection() as conn:
+                with conn.cursor() as cur:
+                    # Determine table based on frequency
+                    if data['frequency'] in ['ultra_high', 'high']:
+                        table = 'security_data_high_freq'
+                    elif data['frequency'] == 'medium':
+                        table = 'security_data_hourly'
+                    else:
+                        table = 'security_data_daily'
+                        
+                    cur.execute(f"""
+                        INSERT INTO {table} 
+                        (symbol, timestamp, close, volume, rsi_14, vwap, 
+                         news_count, catalyst_active)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    """, (
+                        data['symbol'],
+                        data['timestamp'],
+                        data['price'],
+                        data['volume'],
+                        data.get('rsi'),
+                        data.get('vwap'),
+                        0,  # Will update with actual news count
+                        data['catalyst_score'] > 60
+                    ))
+                    conn.commit()
+                    
+        except Exception as e:
+            self.logger.error(f"Error storing security data", error=str(e))
+            
+    def _tracking_thread(self):
+        """Background thread for collecting data on tracked securities"""
+        self.logger.info("Starting tracking thread")
+        
+        while True:
+            try:
+                current_time = datetime.now()
+                
+                with self.tracking_lock:
+                    for symbol, tracking_info in list(self.tracked_securities.items()):
+                        # Check if it's time to collect
+                        freq = tracking_info['collection_frequency']
+                        interval = self.collection_frequencies.get(freq, timedelta(hours=1))
+                        
+                        if current_time - tracking_info['last_updated'] >= interval:
+                            # Collect data in thread pool to avoid blocking
+                            self._collect_security_data(symbol, tracking_info)
+                            
+                # Run pattern discovery every hour
+                if current_time.minute == 0:
+                    self._run_pattern_discovery()
+                    
+            except Exception as e:
+                self.logger.error("Error in tracking thread", error=str(e))
+                
+            # Sleep for 30 seconds before next check
+            time.sleep(30)
+            
+    def _run_pattern_discovery(self):
+        """Run pattern discovery on tracked securities"""
+        try:
+            # Get recent data for all tracked securities
+            with self.tracking_lock:
+                symbols = list(self.tracked_securities.keys())
+                
+            if len(symbols) < 10:
+                return  # Need minimum securities for patterns
+                
+            # Find correlation patterns
+            correlations = self._find_correlation_patterns(symbols)
+            
+            # Find catalyst sympathy patterns
+            sympathy_patterns = self._find_catalyst_sympathy(symbols)
+            
+            # Store discoveries
+            for pattern in correlations + sympathy_patterns:
+                self._store_pattern_discovery(pattern)
+                
+            self.logger.info(f"Pattern discovery complete",
+                           correlations=len(correlations),
+                           sympathy=len(sympathy_patterns))
+                           
+        except Exception as e:
+            self.logger.error("Error in pattern discovery", error=str(e))
+            
+    def _find_correlation_patterns(self, symbols: List[str]) -> List[Dict]:
+        """Find securities that move together"""
+        patterns = []
         
         try:
-            # Get news data from news service
-            response = requests.post(
-                f"{self.news_service_url}/bulk_analysis",
-                json={'symbols': [s['symbol'] for s in universe]},
-                timeout=10
-            )
-            
-            if response.status_code == 200:
-                news_data = response.json()
+            # Get price data for all symbols
+            price_data = {}
+            for symbol in symbols:
+                ticker = yf.Ticker(symbol)
+                hist = ticker.history(period='5d', interval='1h')
+                if not hist.empty:
+                    price_data[symbol] = hist['Close'].pct_change().dropna()
+                    
+            # Calculate correlations
+            if len(price_data) >= 2:
+                df = pd.DataFrame(price_data)
+                corr_matrix = df.corr()
                 
-                # Merge news data with universe data
-                for stock in universe:
-                    symbol = stock['symbol']
-                    if symbol in news_data:
-                        stock['news_sentiment'] = news_data[symbol].get('sentiment', 0)
-                        stock['news_count'] = news_data[symbol].get('count', 0)
-                        stock['has_catalyst'] = news_data[symbol].get('has_catalyst', False)
+                # Find high correlations
+                for i in range(len(corr_matrix.columns)):
+                    for j in range(i+1, len(corr_matrix.columns)):
+                        symbol1 = corr_matrix.columns[i]
+                        symbol2 = corr_matrix.columns[j]
+                        correlation = corr_matrix.iloc[i, j]
                         
-                        # Include if has catalyst
-                        if stock['has_catalyst']:
-                            catalyst_filtered.append(stock)
+                        if abs(correlation) > 0.7:
+                            pattern = {
+                                'type': 'correlation',
+                                'symbols': [symbol1, symbol2],
+                                'correlation': correlation,
+                                'timestamp': datetime.now(),
+                                'confidence': abs(correlation)
+                            }
+                            patterns.append(pattern)
                             
         except Exception as e:
-            self.logger.error("Failed to get news data", error=str(e))
-            # Fall back to including high movers without news check
-            catalyst_filtered = sorted(universe, 
-                                     key=lambda x: abs(x['price_change_pct']), 
-                                     reverse=True)[:self.scan_params['catalyst_filter_size']]
-        
-        return catalyst_filtered
-    
-    def _score_and_select(self, candidates: List[Dict], mode: str) -> List[Dict]:
-        """Score candidates and select top picks"""
-        # Calculate composite score for each candidate
-        for candidate in candidates:
-            score = 0
+            self.logger.error("Error finding correlations", error=str(e))
             
-            # Price movement score (0-30 points)
-            move_score = min(abs(candidate['price_change_pct']) * 3, 30)
-            score += move_score
-            
-            # Volume score (0-25 points)
-            vol_score = min(candidate['relative_volume'] * 5, 25)
-            score += vol_score
-            
-            # News catalyst score (0-25 points)
-            if candidate.get('has_catalyst'):
-                news_score = 15 + min(candidate.get('news_sentiment', 0) * 10, 10)
-                score += news_score
-            
-            # Pre-market bonus (0-20 points)
-            if mode == 'premarket':
-                score *= self.scan_params['premarket_weight']
-            
-            # Add score to candidate
-            candidate['score'] = round(score, 2)
-            candidate['scan_timestamp'] = datetime.now()
+        return patterns
         
-        # Sort by score and select top picks
-        candidates.sort(key=lambda x: x['score'], reverse=True)
-        final_picks = candidates[:self.scan_params['final_selection_size']]
+    def _find_catalyst_sympathy(self, symbols: List[str]) -> List[Dict]:
+        """Find securities that react to similar catalysts"""
+        patterns = []
         
-        # Add ranking
-        for i, pick in enumerate(final_picks):
-            pick['rank'] = i + 1
+        # Group by recent catalyst events
+        catalyst_groups = {}
+        
+        with self.tracking_lock:
+            for symbol, info in self.tracked_securities.items():
+                if symbol not in symbols:
+                    continue
+                    
+                # Get recent catalyst
+                if info['catalyst_events']:
+                    latest = info['catalyst_events'][-1]
+                    catalyst_type = latest.get('catalyst_type', 'unknown')
+                    
+                    if catalyst_type not in catalyst_groups:
+                        catalyst_groups[catalyst_type] = []
+                    catalyst_groups[catalyst_type].append(symbol)
+                    
+        # Find groups that moved together
+        for catalyst_type, group_symbols in catalyst_groups.items():
+            if len(group_symbols) >= 2:
+                pattern = {
+                    'type': 'catalyst_sympathy',
+                    'catalyst': catalyst_type,
+                    'symbols': group_symbols,
+                    'timestamp': datetime.now(),
+                    'confidence': 0.7
+                }
+                patterns.append(pattern)
+                
+        return patterns
+        
+    def _store_pattern_discovery(self, pattern: Dict):
+        """Store discovered pattern in database"""
+        try:
+            with get_db_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        INSERT INTO ml_pattern_discoveries
+                        (pattern_type, securities_involved, pattern_confidence,
+                         trigger_conditions, discovery_date)
+                        VALUES (%s, %s, %s, %s, %s)
+                    """, (
+                        pattern['type'],
+                        json.dumps(pattern['symbols']),
+                        pattern['confidence'],
+                        json.dumps(pattern),
+                        pattern['timestamp']
+                    ))
+                    conn.commit()
+                    
+        except Exception as e:
+            self.logger.error("Error storing pattern discovery", error=str(e))
             
-        return final_picks
-    
-    def _is_cache_valid(self) -> bool:
-        """Check if cached results are still valid"""
-        if not self.scan_cache['timestamp']:
-            return False
+    def _calculate_tracking_stats(self) -> Dict:
+        """Calculate statistics about tracked securities"""
+        with self.tracking_lock:
+            freq_counts = {}
+            for info in self.tracked_securities.values():
+                freq = info['collection_frequency']
+                freq_counts[freq] = freq_counts.get(freq, 0) + 1
+                
+            total_data_points = sum(
+                info['data_points_collected'] 
+                for info in self.tracked_securities.values()
+            )
             
-        cache_time = self.scan_cache['timestamp']
-        if not isinstance(cache_time, datetime):
-            return False
+            return {
+                'total_tracked': len(self.tracked_securities),
+                'frequency_distribution': freq_counts,
+                'total_data_points': total_data_points,
+                'active_high_freq': freq_counts.get('high', 0),
+                'archived': freq_counts.get('archive', 0)
+            }
             
-        age = (datetime.now() - cache_time).total_seconds()
-        
-        return age < self.scan_params['cache_ttl']
-        
-    def _get_mock_symbol_data(self, symbol: str) -> Dict:
-        """Generate mock data for testing"""
-        import random
-        
-        # Generate somewhat realistic data based on symbol hash
-        random.seed(hash(symbol))
-        
-        base_price = random.uniform(10, 200)
-        volatility = random.uniform(0.01, 0.05)
-        
-        return {
-            'symbol': symbol,
-            'price': base_price,
-            'volume': random.randint(500000, 10000000),
-            'avg_volume': random.randint(1000000, 5000000),
-            'relative_volume': random.uniform(0.5, 3.0),
-            'price_change': base_price * random.uniform(-volatility, volatility),
-            'price_change_pct': random.uniform(-5, 5),
-            'market_cap': random.randint(1000000000, 50000000000),
-            'sector': random.choice(['Technology', 'Healthcare', 'Financial', 'Energy']),
-            'industry': 'Mock Industry',
-            'timestamp': datetime.now().isoformat()
-        }
+    def _start_tracking_thread(self):
+        """Start the background tracking thread"""
+        thread = threading.Thread(target=self._tracking_thread, daemon=True)
+        thread.start()
         
     def _register_with_coordination(self):
         """Register with coordination service"""
@@ -582,25 +618,32 @@ class DynamicSecurityScanner:
             response = requests.post(
                 f"{self.coordination_url}/register_service",
                 json={
-                    'service_name': 'security_scanner',
+                    'service_name': 'scanner_service',
                     'service_info': {
                         'url': f"http://scanner-service:{self.port}",
                         'port': self.port,
-                        'version': '2.1.1',
-                        'capabilities': ['dynamic_scanning', 'catalyst_filtering', 'pre_market']
+                        'version': '2.2.0',
+                        'capabilities': [
+                            'market_scanning', 
+                            'catalyst_scoring',
+                            'top_100_tracking',  # NEW capability
+                            'pattern_discovery'   # NEW capability
+                        ]
                     }
                 },
                 timeout=5
             )
             if response.status_code == 200:
                 self.logger.info("Successfully registered with coordination service")
+            else:
+                self.logger.warning(f"Registration returned status {response.status_code}")
         except Exception as e:
             self.logger.warning(f"Could not register with coordination", error=str(e))
             
     def run(self):
         """Start the scanner service"""
-        self.logger.info("Starting Dynamic Security Scanner",
-                        version="2.1.1",
+        self.logger.info("Starting Enhanced Scanner Service",
+                        version="2.2.0",
                         port=self.port,
                         environment=os.getenv('ENVIRONMENT', 'development'))
         
@@ -608,5 +651,5 @@ class DynamicSecurityScanner:
 
 
 if __name__ == "__main__":
-    service = DynamicSecurityScanner()
+    service = EnhancedSecurityScanner()
     service.run()
