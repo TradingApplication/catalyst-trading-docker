@@ -14,7 +14,7 @@
 # ============================================================================
 
 # Database connection details
-DB_HOST="${DB_HOST:-localhost}"
+DB_HOST="${DB_HOST:-catalyst-trading-db-do-user-23488393-0.l.db.ondigitalocean.com}"
 DB_PORT="${DB_PORT:-25060}"
 DB_NAME="${DB_NAME:-catalyst_trading}"
 DB_USER="${DB_USER:-doadmin}"
