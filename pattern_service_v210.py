@@ -2,31 +2,29 @@
 """
 Name of Application: Catalyst Trading System
 Name of file: pattern_service.py
-Version: 2.1.1
-Last Updated: 2025-07-07
-Purpose: Technical pattern detection and analysis with news catalyst weighting
+Version: 2.1.0
+Last Updated: 2025-07-01
+Purpose: Detect technical patterns with news catalyst context weighting using PostgreSQL
 
 REVISION HISTORY:
-v2.1.1 (2025-07-07) - Fixed missing _register_with_coordination method
-- Added service registration method
-- Fixed initialization sequence
-
 v2.1.0 (2025-07-01) - Production-ready refactor
 - Migrated from SQLite to PostgreSQL
 - All configuration via environment variables
-- Proper database connection pooling
-- Enhanced error handling and retry logic
-- Added source tier classification
+- Enhanced pattern detection algorithms
+- Added pattern caching for performance
+- Improved ML feature collection
+- Better error handling and logging
 
-v2.0.0 (2025-06-27) - Complete rewrite for catalyst-aware patterns
-- News context integration
-- Pre-market emphasis
-- Pattern confidence weighting by catalyst
-- Machine learning readiness
+v2.0.0 (2025-06-28) - Complete rewrite for catalyst-aware analysis
+- Context-weighted pattern detection
+- News alignment scoring
+- Pre-market pattern emphasis
+- ML data collection for patterns
+- Catalyst type influences pattern interpretation
 
 Description of Service:
-This service analyzes technical patterns in stock charts with special
-awareness of news catalysts.
+This service detects traditional candlestick patterns but weights their
+significance based on the presence and type of news catalysts.
 
 KEY INNOVATION:
 - Bullish patterns + positive catalyst = 50% confidence boost
@@ -109,7 +107,7 @@ class CatalystAwarePatternAnalysis:
         # Register with coordination
         self._register_with_coordination()
         
-        self.logger.info("Catalyst-Aware Pattern Analysis v2.1.1 initialized",
+        self.logger.info("Catalyst-Aware Pattern Analysis v2.1.0 initialized",
                         environment=os.getenv('ENVIRONMENT', 'development'),
                         talib_available=TALIB_AVAILABLE)
         
@@ -137,30 +135,6 @@ class CatalystAwarePatternAnalysis:
         self.logger = get_logger()
         self.logger = self.logger.bind(service=self.service_name)
         
-    def _register_with_coordination(self):
-        """Register with coordination service"""
-        try:
-            response = requests.post(
-                f"{self.coordination_url}/register_service",
-                json={
-                    'service_name': 'pattern_analysis',
-                    'service_info': {
-                        'url': f"http://pattern-service:{self.port}",
-                        'port': self.port,
-                        'version': '2.1.1',
-                        'capabilities': ['pattern_detection', 'catalyst_weighting', 'technical_patterns']
-                    }
-                },
-                timeout=5
-            )
-            if response.status_code == 200:
-                self.logger.info("Successfully registered with coordination service")
-            else:
-                self.logger.warning(f"Registration returned status {response.status_code}")
-        except Exception as e:
-            self.logger.warning(f"Could not register with coordination", error=str(e))
-            # Don't fail initialization if coordination is not available yet
-            
     def _load_pattern_config(self) -> Dict:
         """Load pattern configuration with environment overrides"""
         return {
@@ -183,19 +157,29 @@ class CatalystAwarePatternAnalysis:
                     },
                     'min_shadow_ratio': float(os.getenv('SHOOTING_STAR_MIN_SHADOW', '2.0'))
                 },
-                'engulfing': {
-                    'base_confidence': float(os.getenv('ENGULFING_BASE_CONFIDENCE', '70')),
+                'bullish_engulfing': {
+                    'base_confidence': float(os.getenv('BULL_ENGULF_BASE_CONFIDENCE', '70')),
                     'catalyst_boost': {
-                        'positive': float(os.getenv('ENGULFING_POSITIVE_BOOST', '1.4')),
-                        'negative': float(os.getenv('ENGULFING_NEGATIVE_BOOST', '1.4')),
+                        'positive': float(os.getenv('BULL_ENGULF_POSITIVE_BOOST', '1.5')),
+                        'negative': float(os.getenv('BULL_ENGULF_NEGATIVE_BOOST', '0.6')),
                         'neutral': 1.0
-                    }
+                    },
+                    'min_body_ratio': float(os.getenv('BULL_ENGULF_MIN_BODY', '1.5'))
+                },
+                'bearish_engulfing': {
+                    'base_confidence': float(os.getenv('BEAR_ENGULF_BASE_CONFIDENCE', '70')),
+                    'catalyst_boost': {
+                        'positive': float(os.getenv('BEAR_ENGULF_POSITIVE_BOOST', '0.6')),
+                        'negative': float(os.getenv('BEAR_ENGULF_NEGATIVE_BOOST', '1.5')),
+                        'neutral': 1.0
+                    },
+                    'min_body_ratio': float(os.getenv('BEAR_ENGULF_MIN_BODY', '1.5'))
                 },
                 'doji': {
-                    'base_confidence': float(os.getenv('DOJI_BASE_CONFIDENCE', '55')),
+                    'base_confidence': float(os.getenv('DOJI_BASE_CONFIDENCE', '60')),
                     'catalyst_boost': {
-                        'positive': float(os.getenv('DOJI_POSITIVE_BOOST', '1.3')),
-                        'negative': float(os.getenv('DOJI_NEGATIVE_BOOST', '1.3')),
+                        'positive': float(os.getenv('DOJI_POSITIVE_BOOST', '1.2')),
+                        'negative': float(os.getenv('DOJI_NEGATIVE_BOOST', '1.2')),
                         'neutral': 1.0
                     },
                     'max_body_ratio': float(os.getenv('DOJI_MAX_BODY', '0.1'))
@@ -208,7 +192,8 @@ class CatalystAwarePatternAnalysis:
                         'positive': float(os.getenv('THREE_WHITE_POSITIVE_BOOST', '1.6')),
                         'negative': float(os.getenv('THREE_WHITE_NEGATIVE_BOOST', '0.5')),
                         'neutral': 1.0
-                    }
+                    },
+                    'min_consecutive': 3
                 },
                 'three_black_crows': {
                     'base_confidence': float(os.getenv('THREE_BLACK_BASE_CONFIDENCE', '75')),
@@ -216,33 +201,34 @@ class CatalystAwarePatternAnalysis:
                         'positive': float(os.getenv('THREE_BLACK_POSITIVE_BOOST', '0.5')),
                         'negative': float(os.getenv('THREE_BLACK_NEGATIVE_BOOST', '1.6')),
                         'neutral': 1.0
-                    }
+                    },
+                    'min_consecutive': 3
                 }
             },
             'momentum_patterns': {
                 'gap_up': {
-                    'base_confidence': float(os.getenv('GAP_UP_BASE_CONFIDENCE', '60')),
+                    'base_confidence': float(os.getenv('GAP_UP_BASE_CONFIDENCE', '70')),
                     'catalyst_boost': {
                         'positive': float(os.getenv('GAP_UP_POSITIVE_BOOST', '1.7')),
                         'negative': float(os.getenv('GAP_UP_NEGATIVE_BOOST', '0.4')),
                         'neutral': 1.0
                     },
-                    'min_gap_percent': float(os.getenv('GAP_UP_MIN_PERCENT', '1.0'))
+                    'min_gap_percent': float(os.getenv('GAP_UP_MIN_PERCENT', '2.0'))
                 },
                 'gap_down': {
-                    'base_confidence': float(os.getenv('GAP_DOWN_BASE_CONFIDENCE', '60')),
+                    'base_confidence': float(os.getenv('GAP_DOWN_BASE_CONFIDENCE', '70')),
                     'catalyst_boost': {
                         'positive': float(os.getenv('GAP_DOWN_POSITIVE_BOOST', '0.4')),
                         'negative': float(os.getenv('GAP_DOWN_NEGATIVE_BOOST', '1.7')),
                         'neutral': 1.0
                     },
-                    'min_gap_percent': float(os.getenv('GAP_DOWN_MIN_PERCENT', '1.0'))
+                    'min_gap_percent': float(os.getenv('GAP_DOWN_MIN_PERCENT', '2.0'))
                 },
                 'volume_surge': {
-                    'base_confidence': float(os.getenv('VOLUME_SURGE_BASE_CONFIDENCE', '50')),
+                    'base_confidence': float(os.getenv('VOLUME_SURGE_BASE_CONFIDENCE', '65')),
                     'catalyst_boost': {
-                        'positive': float(os.getenv('VOLUME_SURGE_POSITIVE_BOOST', '1.5')),
-                        'negative': float(os.getenv('VOLUME_SURGE_NEGATIVE_BOOST', '1.5')),
+                        'positive': float(os.getenv('VOLUME_SURGE_POSITIVE_BOOST', '1.4')),
+                        'negative': float(os.getenv('VOLUME_SURGE_NEGATIVE_BOOST', '1.4')),
                         'neutral': 1.0
                     },
                     'min_volume_ratio': float(os.getenv('VOLUME_SURGE_MIN_RATIO', '2.0'))
@@ -253,13 +239,13 @@ class CatalystAwarePatternAnalysis:
     def setup_routes(self):
         """Setup Flask routes"""
         @self.app.route('/health', methods=['GET'])
-        def healthcheck():
-            """Health check endpoint"""
+        def health():
             db_health = health_check()
             return jsonify({
-                "status": "healthy" if db_health['database'] else "degraded",
-                "service": self.service_name,
-                "version": "2.1.1",
+                "status": "healthy" if db_health['database'] == 'healthy' else "degraded",
+                "service": "pattern_analysis",
+                "version": "2.1.0",
+                "mode": "catalyst-aware",
                 "database": db_health['database'],
                 "redis": db_health['redis'],
                 "talib": TALIB_AVAILABLE,
@@ -320,18 +306,179 @@ class CatalystAwarePatternAnalysis:
                 
             result = self._update_pattern_outcome(pattern_id, outcome)
             return jsonify(result)
-
-    # ... rest of the methods remain the same ...
-    
-    def run(self):
-        """Start the pattern analysis service"""
-        self.logger.info("Starting Pattern Analysis Service",
-                        version="2.1.1",
-                        port=self.port,
-                        environment=os.getenv('ENVIRONMENT', 'development'))
+            
+    def analyze_with_catalyst_context(self, symbol: str, timeframe: str = '5min', 
+                                    context: Dict = None) -> Dict:
+        """
+        Analyze patterns with catalyst awareness
+        """
+        self.logger.info(f"Analyzing {symbol} with catalyst context",
+                        symbol=symbol,
+                        timeframe=timeframe,
+                        has_context=bool(context))
         
-        self.app.run(host='0.0.0.0', port=self.port, debug=False)
-
+        # Check cache first
+        cache_key = f"pattern:{symbol}:{timeframe}"
+        cached = self.redis_client.get(cache_key)
+        if cached and not context:  # Don't use cache if specific context provided
+            self.logger.debug("Using cached pattern data", symbol=symbol)
+            return json.loads(cached)
+        
+        # Get price data
+        price_data = self._get_price_data(symbol, timeframe)
+        if price_data is None or len(price_data) < self.lookback_periods:
+            return {
+                'symbol': symbol,
+                'status': 'insufficient_data',
+                'patterns': []
+            }
+            
+        # Extract catalyst information
+        catalyst_info = self._extract_catalyst_info(context)
+        
+        # Detect patterns
+        detected_patterns = []
+        
+        # Check reversal patterns
+        for pattern_name, config in self.pattern_config['reversal_patterns'].items():
+            pattern = self._detect_reversal_pattern(
+                price_data, pattern_name, config, catalyst_info
+            )
+            if pattern and pattern['final_confidence'] >= self.min_confidence:
+                detected_patterns.append(pattern)
+                
+        # Check continuation patterns
+        for pattern_name, config in self.pattern_config['continuation_patterns'].items():
+            pattern = self._detect_continuation_pattern(
+                price_data, pattern_name, config, catalyst_info
+            )
+            if pattern and pattern['final_confidence'] >= self.min_confidence:
+                detected_patterns.append(pattern)
+                
+        # Check momentum patterns
+        for pattern_name, config in self.pattern_config['momentum_patterns'].items():
+            pattern = self._detect_momentum_pattern(
+                price_data, pattern_name, config, catalyst_info
+            )
+            if pattern and pattern['final_confidence'] >= self.min_confidence:
+                detected_patterns.append(pattern)
+                
+        # Add technical indicators
+        self._add_technical_indicators(price_data, detected_patterns)
+        
+        # Sort by confidence
+        detected_patterns.sort(key=lambda x: x['final_confidence'], reverse=True)
+        
+        # Save patterns to database
+        for pattern in detected_patterns:
+            self._save_pattern(symbol, pattern, catalyst_info)
+            
+        result = {
+            'symbol': symbol,
+            'timestamp': datetime.now().isoformat(),
+            'timeframe': timeframe,
+            'catalyst_present': catalyst_info['has_catalyst'],
+            'catalyst_type': catalyst_info.get('catalyst_type'),
+            'patterns': detected_patterns[:3],  # Top 3 patterns
+            'recommendation': self._generate_recommendation(detected_patterns, catalyst_info)
+        }
+        
+        # Cache result if no specific context
+        if not context:
+            self.redis_client.setex(
+                cache_key,
+                self.cache_ttl,
+                json.dumps(result)
+            )
+        
+        return result
+        
+    def _get_price_data(self, symbol: str, timeframe: str) -> Optional[pd.DataFrame]:
+        """Get price data for analysis"""
+        if not YFINANCE_AVAILABLE:
+            return self._get_mock_price_data(symbol)
+            
+        try:
+            ticker = yf.Ticker(symbol)
+            
+            # Determine period based on timeframe
+            period_map = {
+                '1min': '1d',
+                '5min': '5d',
+                '15min': '1mo',
+                '30min': '1mo',
+                '1h': '3mo',
+                '1d': '1y'
+            }
+            
+            period = period_map.get(timeframe, '1mo')
+            data = ticker.history(period=period, interval=timeframe)
+            
+            if data.empty:
+                self.logger.warning(f"No data retrieved for {symbol}")
+                return None
+                
+            return data
+            
+        except Exception as e:
+            self.logger.error(f"Error fetching data for {symbol}", error=str(e))
+            return None
+            
+    def _extract_catalyst_info(self, context: Dict) -> Dict:
+        """Extract catalyst information from context"""
+        if not context:
+            return {
+                'has_catalyst': False,
+                'catalyst_type': None,
+                'catalyst_sentiment': 'neutral',
+                'catalyst_score': 0,
+                'is_pre_market': False
+            }
+            
+        # Determine catalyst sentiment based on type
+        catalyst_type = context.get('catalyst_type')
+        sentiment_map = {
+            'earnings_beat': 'positive',
+            'earnings_miss': 'negative',
+            'fda_approval': 'positive',
+            'fda_rejection': 'negative',
+            'merger_announcement': 'positive',
+            'lawsuit': 'negative',
+            'upgrade': 'positive',
+            'downgrade': 'negative',
+            'guidance_raised': 'positive',
+            'guidance_lowered': 'negative',
+            'insider_buying': 'positive',
+            'insider_selling': 'negative'
+        }
+        
+        catalyst_sentiment = sentiment_map.get(catalyst_type, 'neutral')
+        
+        # Special handling for earnings
+        if catalyst_type == 'earnings' and 'earnings_result' in context:
+            catalyst_sentiment = 'positive' if context['earnings_result'] == 'beat' else 'negative'
+            
+        return {
+            'has_catalyst': context.get('has_catalyst', False),
+            'catalyst_type': catalyst_type,
+            'catalyst_sentiment': catalyst_sentiment,
+            'catalyst_score': context.get('catalyst_score', 0),
+            'is_pre_market': context.get('market_state') == 'pre-market',
+            'news_count': context.get('news_count', 0)
+        }
+        
+    def _detect_reversal_pattern(self, data: pd.DataFrame, pattern_name: str, 
+                                config: Dict, catalyst_info: Dict) -> Optional[Dict]:
+        """Detect reversal patterns with catalyst weighting"""
+        
+        if len(data) < 2:
+            return None
+            
+        latest = data.iloc[-1]
+        prev = data.iloc[-2]
+        
+        pattern_detected = False
+        pattern
 
 if __name__ == "__main__":
     service = CatalystAwarePatternAnalysis()
