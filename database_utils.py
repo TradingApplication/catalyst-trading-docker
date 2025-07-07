@@ -7,6 +7,8 @@ Last Updated: 2025-07-07
 Purpose: Centralized database connection management for all services
 
 REVISION HISTORY:
+v2.32 (2025-07-08) - New trading functions added
+
 v2.32 (2025-07-07) - Fixed health check and added missing functions
 - Changed health_check to use 'database' key instead of 'postgresql'
 - Added insert_trading_candidates function
@@ -701,3 +703,258 @@ try:
 except Exception as e:
     logger.warning("Failed to initialize database utilities on import", error=str(e))
     # Don't raise here - let services handle initialization in their __init__
+#!/usr/bin/env python3
+"""
+Trading Cycle Functions to add to database_utils.py
+These functions manage trading workflow cycles for the coordination service
+"""
+
+# =============================================================================
+# TRADING CYCLE FUNCTIONS - Add these to database_utils.py
+# =============================================================================
+
+def create_trading_cycle(cycle_data: Dict) -> int:
+    """
+    Create a new trading cycle entry
+    
+    Args:
+        cycle_data: Dictionary containing cycle information
+        
+    Returns:
+        ID of the created cycle
+    """
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                # Create table if it doesn't exist
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS trading_cycles (
+                        id SERIAL PRIMARY KEY,
+                        cycle_id VARCHAR(50) UNIQUE NOT NULL,
+                        start_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        end_time TIMESTAMP,
+                        mode VARCHAR(20),
+                        status VARCHAR(20) DEFAULT 'active',
+                        news_collected INTEGER DEFAULT 0,
+                        securities_scanned INTEGER DEFAULT 0,
+                        patterns_detected INTEGER DEFAULT 0,
+                        signals_generated INTEGER DEFAULT 0,
+                        trades_executed INTEGER DEFAULT 0,
+                        metadata JSONB
+                    )
+                """)
+                
+                # Insert new cycle
+                cur.execute("""
+                    INSERT INTO trading_cycles (
+                        cycle_id, mode, metadata
+                    ) VALUES (%s, %s, %s)
+                    RETURNING id
+                """, (
+                    cycle_data.get('cycle_id'),
+                    cycle_data.get('mode', 'normal'),
+                    json.dumps(cycle_data.get('metadata', {}))
+                ))
+                
+                cycle_id = cur.fetchone()['id']
+                conn.commit()
+                
+                logger.info(f"Created trading cycle", cycle_id=cycle_id)
+                return cycle_id
+                
+    except Exception as e:
+        logger.error("Failed to create trading cycle", error=str(e))
+        raise DatabaseError(f"Failed to create trading cycle: {str(e)}")
+
+
+def update_trading_cycle(cycle_id: str, updates: Dict) -> bool:
+    """
+    Update trading cycle information
+    
+    Args:
+        cycle_id: Cycle identifier
+        updates: Dictionary of fields to update
+        
+    Returns:
+        True if updated successfully
+    """
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                # Build update query dynamically
+                update_fields = []
+                values = []
+                
+                for field, value in updates.items():
+                    if field in ['news_collected', 'securities_scanned', 'patterns_detected', 
+                               'signals_generated', 'trades_executed', 'status']:
+                        update_fields.append(f"{field} = %s")
+                        values.append(value)
+                
+                if not update_fields:
+                    return False
+                
+                values.append(cycle_id)
+                query = f"""
+                    UPDATE trading_cycles 
+                    SET {', '.join(update_fields)}
+                    WHERE cycle_id = %s
+                """
+                
+                cur.execute(query, values)
+                updated = cur.rowcount > 0
+                conn.commit()
+                
+                return updated
+                
+    except Exception as e:
+        logger.error("Failed to update trading cycle", error=str(e))
+        return False
+
+
+def get_active_trading_cycle() -> Optional[Dict]:
+    """
+    Get the current active trading cycle
+    
+    Returns:
+        Dictionary with cycle information or None
+    """
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT * FROM trading_cycles 
+                    WHERE status = 'active' 
+                    ORDER BY start_time DESC 
+                    LIMIT 1
+                """)
+                
+                result = cur.fetchone()
+                if result:
+                    cycle = dict(result)
+                    # Convert timestamps to ISO format
+                    if cycle.get('start_time'):
+                        cycle['start_time'] = cycle['start_time'].isoformat()
+                    if cycle.get('end_time'):
+                        cycle['end_time'] = cycle['end_time'].isoformat()
+                    return cycle
+                    
+                return None
+                
+    except Exception as e:
+        logger.error("Failed to get active trading cycle", error=str(e))
+        return None
+
+
+def complete_trading_cycle(cycle_id: str) -> bool:
+    """
+    Mark a trading cycle as complete
+    
+    Args:
+        cycle_id: Cycle identifier
+        
+    Returns:
+        True if completed successfully
+    """
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    UPDATE trading_cycles 
+                    SET status = 'completed', 
+                        end_time = CURRENT_TIMESTAMP
+                    WHERE cycle_id = %s AND status = 'active'
+                """, (cycle_id,))
+                
+                updated = cur.rowcount > 0
+                conn.commit()
+                
+                if updated:
+                    logger.info(f"Completed trading cycle", cycle_id=cycle_id)
+                
+                return updated
+                
+    except Exception as e:
+        logger.error("Failed to complete trading cycle", error=str(e))
+        return False
+
+
+def log_workflow_step(cycle_id: str, step: str, status: str, details: Optional[Dict] = None) -> bool:
+    """
+    Log a workflow step execution
+    
+    Args:
+        cycle_id: Trading cycle ID
+        step: Step name (e.g., 'news_collection', 'security_scan')
+        status: Status of the step (e.g., 'started', 'completed', 'failed')
+        details: Optional details about the step
+        
+    Returns:
+        True if logged successfully
+    """
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                # Create workflow_log table if it doesn't exist
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS workflow_log (
+                        id SERIAL PRIMARY KEY,
+                        cycle_id VARCHAR(50),
+                        step VARCHAR(50),
+                        status VARCHAR(20),
+                        details JSONB,
+                        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+                
+                # Insert log entry
+                cur.execute("""
+                    INSERT INTO workflow_log (cycle_id, step, status, details)
+                    VALUES (%s, %s, %s, %s)
+                """, (
+                    cycle_id,
+                    step,
+                    status,
+                    json.dumps(details) if details else None
+                ))
+                
+                conn.commit()
+                return True
+                
+    except Exception as e:
+        logger.error("Failed to log workflow step", error=str(e))
+        return False
+
+
+def get_workflow_status(cycle_id: str) -> List[Dict]:
+    """
+    Get workflow status for a trading cycle
+    
+    Args:
+        cycle_id: Trading cycle ID
+        
+    Returns:
+        List of workflow steps with their status
+    """
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT step, status, details, timestamp
+                    FROM workflow_log
+                    WHERE cycle_id = %s
+                    ORDER BY timestamp DESC
+                """, (cycle_id,))
+                
+                results = []
+                for row in cur.fetchall():
+                    step_info = dict(row)
+                    if step_info.get('timestamp'):
+                        step_info['timestamp'] = step_info['timestamp'].isoformat()
+                    results.append(step_info)
+                
+                return results
+                
+    except Exception as e:
+        logger.error("Failed to get workflow status", error=str(e))
+        return []
