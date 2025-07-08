@@ -7,16 +7,17 @@ Last Updated: 2025-07-07
 Purpose: Centralized database connection management for all services
 
 REVISION HISTORY:
-v2.32 (2025-07-08) - New trading functions added
+v2.3.2 (2025-07-08) - New trading functions added
+    - update_service_health, get_configuration, get_active_trading_cycle
 
-v2.32 (2025-07-07) - Fixed health check and added missing functions
+v2.3.2 (2025-07-07) - Fixed health check and added missing functions
 - Changed health_check to use 'database' key instead of 'postgresql'
 - Added insert_trading_candidates function
 - Added get_active_candidates function
 - Added update_candidate_status function
 - Added insert_pattern_detection function
 
-v2.31 (2025-07-01) - Production optimizations
+v2.3.1 (2025-07-01) - Production optimizations
 - Enhanced connection pooling
 - Better error handling
 - Performance improvements
@@ -958,3 +959,269 @@ def get_workflow_status(cycle_id: str) -> List[Dict]:
     except Exception as e:
         logger.error("Failed to get workflow status", error=str(e))
         return []
+
+# =============================================================================
+# v2.3.2 additional trading functions
+# =============================================================================
+
+def update_service_health(service_name: str, status: str, metrics: Optional[Dict] = None) -> bool:
+    """
+    Update service health status
+    
+    Args:
+        service_name: Name of the service
+        status: Status (healthy, degraded, down)
+        metrics: Optional performance metrics
+        
+    Returns:
+        True if updated successfully
+    """
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                # Create table if it doesn't exist
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS service_health (
+                        id SERIAL PRIMARY KEY,
+                        service_name VARCHAR(50) NOT NULL,
+                        status VARCHAR(20) NOT NULL,
+                        last_check TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        response_time_ms INTEGER,
+                        error_message TEXT,
+                        requests_processed INTEGER,
+                        errors_count INTEGER,
+                        avg_response_time_ms INTEGER,
+                        metadata JSONB,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+                
+                # Update or insert service health
+                cur.execute("""
+                    INSERT INTO service_health (
+                        service_name, status, last_check, response_time_ms,
+                        requests_processed, errors_count, avg_response_time_ms, metadata
+                    ) VALUES (%s, %s, CURRENT_TIMESTAMP, %s, %s, %s, %s, %s)
+                    ON CONFLICT (service_name) DO UPDATE SET
+                        status = EXCLUDED.status,
+                        last_check = EXCLUDED.last_check,
+                        response_time_ms = EXCLUDED.response_time_ms,
+                        requests_processed = EXCLUDED.requests_processed,
+                        errors_count = EXCLUDED.errors_count,
+                        avg_response_time_ms = EXCLUDED.avg_response_time_ms,
+                        metadata = EXCLUDED.metadata
+                """, (
+                    service_name,
+                    status,
+                    metrics.get('response_time_ms') if metrics else None,
+                    metrics.get('requests_processed') if metrics else None,
+                    metrics.get('errors_count') if metrics else None,
+                    metrics.get('avg_response_time_ms') if metrics else None,
+                    json.dumps(metrics) if metrics else None
+                ))
+                
+                conn.commit()
+                return True
+                
+    except Exception as e:
+        logger.error("Failed to update service health", error=str(e))
+        return False
+
+
+def get_configuration(key: str, default: Any = None) -> Any:
+    """
+    Get configuration value from database
+    
+    Args:
+        key: Configuration key
+        default: Default value if not found
+        
+    Returns:
+        Configuration value or default
+    """
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                # Create table if it doesn't exist
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS configuration (
+                        key VARCHAR(100) PRIMARY KEY,
+                        value TEXT NOT NULL,
+                        data_type VARCHAR(20),
+                        category VARCHAR(50),
+                        description TEXT,
+                        last_modified TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        modified_by VARCHAR(50)
+                    )
+                """)
+                
+                # Insert default configurations if not exist
+                default_configs = [
+                    ('max_positions', '5', 'int', 'risk', 'Maximum concurrent positions', 'system'),
+                    ('position_size_pct', '20', 'float', 'risk', 'Max position size as % of capital', 'system'),
+                    ('premarket_position_pct', '10', 'float', 'risk', 'Pre-market position size limit', 'system'),
+                    ('min_catalyst_score', '30', 'float', 'trading', 'Minimum score to consider', 'system'),
+                    ('stop_loss_pct', '2', 'float', 'risk', 'Default stop loss percentage', 'system'),
+                    ('scan_interval_premarket', '300', 'int', 'schedule', 'Pre-market scan interval seconds', 'system'),
+                    ('scan_interval_regular', '1800', 'int', 'schedule', 'Regular hours scan interval', 'system'),
+                    ('scan_interval_afterhours', '3600', 'int', 'schedule', 'After-hours scan interval', 'system')
+                ]
+                
+                for config in default_configs:
+                    cur.execute("""
+                        INSERT INTO configuration (key, value, data_type, category, description, modified_by)
+                        VALUES (%s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (key) DO NOTHING
+                    """, config)
+                
+                # Get the requested configuration
+                cur.execute("SELECT value, data_type FROM configuration WHERE key = %s", (key,))
+                result = cur.fetchone()
+                
+                if result:
+                    value, data_type = result['value'], result['data_type']
+                    # Convert to appropriate type
+                    if data_type == 'int':
+                        return int(value)
+                    elif data_type == 'float':
+                        return float(value)
+                    elif data_type == 'bool':
+                        return value.lower() in ('true', '1', 'yes')
+                    elif data_type == 'json':
+                        return json.loads(value)
+                    else:
+                        return value
+                else:
+                    return default
+                    
+    except Exception as e:
+        logger.error("Failed to get configuration", key=key, error=str(e))
+        return default
+
+
+def get_active_trading_cycle() -> Optional[Dict]:
+    """
+    Get the current active trading cycle
+    
+    Returns:
+        Dictionary with cycle information or None
+    """
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT * FROM trading_cycles 
+                    WHERE status = 'active' 
+                    ORDER BY start_time DESC 
+                    LIMIT 1
+                """)
+                
+                result = cur.fetchone()
+                if result:
+                    cycle = dict(result)
+                    # Convert timestamps to ISO format
+                    if cycle.get('start_time'):
+                        cycle['start_time'] = cycle['start_time'].isoformat()
+                    if cycle.get('end_time'):
+                        cycle['end_time'] = cycle['end_time'].isoformat()
+                    return cycle
+                    
+                return None
+                
+    except Exception as e:
+        logger.error("Failed to get active trading cycle", error=str(e))
+        return None
+
+
+def complete_trading_cycle(cycle_id: str) -> bool:
+    """
+    Mark a trading cycle as complete
+    
+    Args:
+        cycle_id: Cycle identifier
+        
+    Returns:
+        True if completed successfully
+    """
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    UPDATE trading_cycles 
+                    SET status = 'completed', 
+                        end_time = CURRENT_TIMESTAMP
+                    WHERE cycle_id = %s AND status = 'active'
+                """, (cycle_id,))
+                
+                updated = cur.rowcount > 0
+                conn.commit()
+                
+                if updated:
+                    logger.info(f"Completed trading cycle", cycle_id=cycle_id)
+                
+                return updated
+                
+    except Exception as e:
+        logger.error("Failed to complete trading cycle", error=str(e))
+        return False
+
+
+def get_workflow_status(cycle_id: str) -> List[Dict]:
+    """
+    Get workflow status for a trading cycle
+    
+    Args:
+        cycle_id: Trading cycle ID
+        
+    Returns:
+        List of workflow steps with their status
+    """
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT step, status, details, timestamp
+                    FROM workflow_log
+                    WHERE cycle_id = %s
+                    ORDER BY timestamp DESC
+                """, (cycle_id,))
+                
+                results = []
+                for row in cur.fetchall():
+                    step_info = dict(row)
+                    if step_info.get('timestamp'):
+                        step_info['timestamp'] = step_info['timestamp'].isoformat()
+                    results.append(step_info)
+                
+                return results
+                
+    except Exception as e:
+        logger.error("Failed to get workflow status", error=str(e))
+        return []
+
+
+# Also need to ensure service_health table has unique constraint
+def ensure_service_health_constraint():
+    """
+    Ensure service_health table has proper constraints
+    This should be called once during initialization
+    """
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                # Add unique constraint if it doesn't exist
+                cur.execute("""
+                    DO $$
+                    BEGIN
+                        IF NOT EXISTS (
+                            SELECT 1 FROM pg_constraint 
+                            WHERE conname = 'unique_service_name'
+                        ) THEN
+                            ALTER TABLE service_health 
+                            ADD CONSTRAINT unique_service_name UNIQUE (service_name);
+                        END IF;
+                    END$$;
+                """)
+                conn.commit()
+    except Exception as e:
+        logger.warning("Could not add unique constraint", error=str(e))
