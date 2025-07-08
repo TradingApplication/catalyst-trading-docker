@@ -2,12 +2,12 @@
 """
 Name of Application: Catalyst Trading System
 Name of file: database_utils.py
-Version: 2.32
+Version: 2.3.3
 Last Updated: 2025-07-07
 Purpose: Centralized database connection management for all services
 
 REVISION HISTORY:
-v2.3.2 (2025-07-08) - New trading functions added
+v2.3.3 (2025-07-08) - New trading functions added
     - update_service_health, get_configuration, get_active_trading_cycle
 
 v2.3.2 (2025-07-07) - Fixed health check and added missing functions
@@ -961,7 +961,7 @@ def get_workflow_status(cycle_id: str) -> List[Dict]:
         return []
 
 # =============================================================================
-# v2.3.2 additional trading functions
+# v2.3.3 additional trading functions
 # =============================================================================
 
 def update_service_health(service_name: str, status: str, metrics: Optional[Dict] = None) -> bool:
