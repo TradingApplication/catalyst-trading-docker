@@ -2,16 +2,11 @@
 """
 Name of Application: Catalyst Trading System
 Name of file: reporting_service.py
-Version: 2.1.1
-Last Updated: 2025-07-08
+Version: 2.1.0
+Last Updated: 2025-07-01
 Purpose: Analytics and reporting service for trading performance and system health
 
 REVISION HISTORY:
-v2.1.1 (2025-07-08) - Fixed endpoint calls
-- Changed /service_status to /service_health in two places
-- Fixed _generate_system_health_report method
-- Fixed _get_service_performance_metrics method
-
 v2.1.0 (2025-07-01) - Initial implementation for production deployment
 - PostgreSQL database integration
 - Comprehensive performance analytics
@@ -170,7 +165,7 @@ class ReportingService:
                     'timestamp': datetime.now(timezone.utc).isoformat(),
                     'database': 'healthy',
                     'redis': redis_status,
-                    'version': '2.1.1'
+                    'version': '2.1.0'
                 }), 200
                 
             except Exception as e:
@@ -616,8 +611,7 @@ class ReportingService:
         """Generate comprehensive system health report"""
         # Get service health from coordination service
         try:
-            # FIXED: Changed from /service_status to /service_health
-            response = requests.get(f"{self.coordination_url}/service_health", timeout=10)
+            response = requests.get(f"{self.coordination_url}/service_status", timeout=10)
             service_health = response.json() if response.status_code == 200 else {}
         except:
             service_health = {}
@@ -805,8 +799,7 @@ class ReportingService:
     def _get_service_performance_metrics(self) -> Dict:
         """Get performance metrics for each service"""
         try:
-            # FIXED: Changed from /service_status to /service_health
-            response = requests.get(f"{self.coordination_url}/service_health", timeout=10)
+            response = requests.get(f"{self.coordination_url}/service_status", timeout=10)
             service_status = response.json() if response.status_code == 200 else {}
         except:
             service_status = {}
