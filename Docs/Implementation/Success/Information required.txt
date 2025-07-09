@@ -1,0 +1,49 @@
+But honestly, you have all the critical tables for the system to run:
+
+✅ News collection (news_raw)
+✅ Scanning (trading_candidates)
+✅ Pattern detection (pattern_analysis)
+✅ Signal generation (trading_signals)
+✅ Trade execution (trade_records, positions)
+✅ System coordination (trading_cycles, workflow_log)
+✅ Monitoring (service_health)
+
+Let's quickly add the missing table and then move on to Docker:
+sql-- Add the outcome_tracking table
+CREATE TABLE IF NOT EXISTS outcome_tracking (
+    id SERIAL PRIMARY KEY,
+    news_id BIGINT NOT NULL,
+    symbol VARCHAR(10) NOT NULL,
+    tracked_from TIMESTAMPTZ NOT NULL,
+    tracked_until TIMESTAMPTZ,
+    price_at_news DECIMAL(10,2),
+    price_after_1h DECIMAL(10,2),
+    price_after_4h DECIMAL(10,2),
+    price_after_24h DECIMAL(10,2),
+    max_move_pct DECIMAL(5,2),
+    direction_correct BOOLEAN,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (news_id) REFERENCES news_raw(id)
+);
+
+-- Verify it was created
+\dt outcome_tracking
+
+
+What do you see after running \c catalyst_trading?RetryCCSchema |         Name         | Type  |  Owner
+--------+----------------------+-------+---------
+ public | configuration        | table | doadmin
+ public | narrative_clusters   | table | doadmin
+ public | news_raw             | table | doadmin
+ public | outcome_tracking     | table | doadmin
+ public | pattern_analysis     | table | doadmin
+ public | positions            | table | doadmin
+ public | schema_migrations    | table | doadmin
+ public | service_health       | table | doadmin
+ public | source_metrics       | table | doadmin
+ public | technical_indicators | table | doadmin
+ public | trade_records        | table | doadmin
+ public | trading_candidates   | table | doadmin
+ public | trading_cycles       | table | doadmin
+ public | trading_signals      | table | doadmin
+ public | workflow_log         | table | doadmin
