@@ -2,5 +2,6 @@
 # Deploy
 #------------------------------------------------------------------------------
 
-scp -i ~/.ssh/craigjcolley_do .env root@68.183.177.11:/opt/catalyst-trading-docker/
+scp -i C:\Users\craig\.ssh\craigjcolley_do .env root@68.183.177.11:/opt/catalyst-trading-docker/
+ (pass phrase in Keeper)
 
