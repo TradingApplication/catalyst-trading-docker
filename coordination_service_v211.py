@@ -2,15 +2,11 @@
 """
 Name of Application: Catalyst Trading System
 Name of file: coordination_service.py
-Version: 2.1.2
+Version: 2.1.1
 Last Updated: 2025-07-10
 Purpose: Orchestrate news-driven trading workflow with PostgreSQL and environment variables
 
 REVISION HISTORY:
-v2.1.2 (2025-07-10) - Fixed scanner service name typo
-- Fixed scanner service name in services dictionary
-- Removed extra quotes from scanner service name
-
 v2.1.1 (2025-07-10) - Fixed health check endpoint
 - Fixed KeyError: 'database' by using correct key 'postgresql'
 - Maintained compatibility with database_utils health_check response
@@ -56,13 +52,12 @@ load_dotenv()
 try:
     from database_utils import (
         get_db_connection,
-        create_trading_cycle,
+        insert_trading_cycle,
         update_trading_cycle,
         update_service_health,
-        get_service_health,
+        get_service_health_history,
         health_check,
-        get_redis,
-        log_workflow_step
+        get_redis
     )
 except ImportError as e:
     print(f"Import error: {e}")
@@ -70,8 +65,8 @@ except ImportError as e:
     from database_utils import get_db_connection, health_check, get_redis
     
     # Define missing functions if not available
-    def create_trading_cycle(mode='normal'):
-        return f"CYCLE_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{mode}"
+    def insert_trading_cycle(cycle_data):
+        return cycle_data.get('cycle_id', 'CYCLE_STUB')
     
     def update_trading_cycle(cycle_id, updates):
         pass
@@ -79,11 +74,8 @@ except ImportError as e:
     def update_service_health(service_name, status, response_time, error=None):
         pass
     
-    def get_service_health(service_name=None, hours=24):
+    def get_service_health_history(hours=24):
         return []
-    
-    def log_workflow_step(cycle_id, step_name, status, result=None, records_processed=None, records_output=None, error_message=None):
-        pass
 
 
 class NewsDriverCoordinator:
@@ -112,7 +104,7 @@ class NewsDriverCoordinator:
                 'health_check': '/health'
             },
             'scanner': {
-                'name': 'scanner_service',  # Fixed: removed extra quotes
+                'name': '   "service": "scanner_service",', 
                 'url': os.getenv('SCANNER_SERVICE_URL', 'http://scanner-service:5001'),
                 'port': 5001,
                 'required': True,
@@ -191,7 +183,7 @@ class NewsDriverCoordinator:
         self.start_health_monitor()
         self.start_scheduler()
         
-        self.logger.info("Coordination Service v2.1.2 initialized", 
+        self.logger.info("Coordination Service v2.1.1 initialized", 
                         environment=os.getenv('ENVIRONMENT', 'development'))
         
     def setup_environment(self):
@@ -223,7 +215,7 @@ class NewsDriverCoordinator:
             return jsonify({
                 "status": "healthy" if db_health['postgresql']['status'] == 'healthy' else "degraded",
                 "service": "coordination",
-                "version": "2.1.2",
+                "version": "2.1.1",
                 "mode": "news-driven",
                 "database": db_health['postgresql']['status'],
                 "redis": db_health['redis']['status'],
@@ -237,14 +229,11 @@ class NewsDriverCoordinator:
             service_name = data.get('service_name')
             service_info = data.get('service_info', {})
             
-            # Find the service by name and update its info
-            for key, service in self.services.items():
-                if service['name'] == service_name:
-                    service.update(service_info)
-                    self.logger.info("Service registered/updated", 
-                                   service=service_name,
-                                   info=service_info)
-                    break
+            if service_name in self.services:
+                self.services[service_name].update(service_info)
+                self.logger.info("Service registered/updated", 
+                               service=service_name,
+                               info=service_info)
                 
             return jsonify({
                 'status': 'registered',
@@ -295,8 +284,7 @@ class NewsDriverCoordinator:
     def start_new_cycle(self, mode: str) -> Dict:
         """Start a new trading cycle"""
         try:
-            # Create cycle using database function
-            cycle_id = create_trading_cycle(mode)
+            cycle_id = f"CYCLE_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{mode}"
             
             self.current_cycle = {
                 'cycle_id': cycle_id,
@@ -307,9 +295,14 @@ class NewsDriverCoordinator:
                 'errors': []
             }
             
-            # Log workflow start
-            log_workflow_step(cycle_id, 'workflow_start', 'started', 
-                            result={'mode': mode})
+            # Save to database
+            cycle_data = {
+                'cycle_id': cycle_id,
+                'mode': mode,
+                'status': 'running',
+                'start_time': datetime.now()
+            }
+            insert_trading_cycle(cycle_data)
             
             # Start workflow in background
             thread = threading.Thread(
@@ -332,91 +325,63 @@ class NewsDriverCoordinator:
                            cycle_id=cycle_id, mode=mode)
             
             # Step 1: Collect News
-            log_workflow_step(cycle_id, 'news_collection', 'started')
             news_result = self.execute_step('news', '/collect', {
                 'mode': mode,
                 'cycle_id': cycle_id
             })
             
-            if news_result.get('status') == 'success' or news_result.get('articles_collected'):
-                articles_collected = news_result.get('articles_collected', 0)
-                self.current_cycle['news_collected'] = articles_collected
+            if news_result.get('status') == 'success':
+                self.current_cycle['news_collected'] = news_result.get('articles_collected', 0)
                 self.current_cycle['steps_completed'].append('news_collection')
-                log_workflow_step(cycle_id, 'news_collection', 'completed',
-                                result=news_result, records_processed=articles_collected)
-            else:
-                log_workflow_step(cycle_id, 'news_collection', 'failed',
-                                error_message=news_result.get('error', 'Unknown error'))
                 
             # Step 2: Security Scanning
-            log_workflow_step(cycle_id, 'security_scanning', 'started')
             scan_result = self.execute_step('scanner', '/scan', {
                 'mode': mode,
                 'force': 'true'
             })
             
-            if scan_result.get('securities') or scan_result.get('final_picks'):
-                candidates = scan_result.get('securities', scan_result.get('final_picks', []))
+            if scan_result.get('status') == 'success' or scan_result.get('final_picks'):
+                candidates = scan_result.get('final_picks', [])
                 self.current_cycle['candidates_selected'] = len(candidates)
                 self.current_cycle['steps_completed'].append('security_scanning')
                 
-                log_workflow_step(cycle_id, 'security_scanning', 'completed',
-                                result=scan_result,
-                                records_processed=scan_result.get('metadata', {}).get('total_scanned', 0),
-                                records_output=len(candidates))
-                
                 # Step 3: Pattern Analysis for each candidate
-                patterns_analyzed = 0
                 for candidate in candidates[:5]:  # Top 5 only
                     pattern_result = self.execute_step('pattern', '/analyze_pattern', {
                         'symbol': candidate.get('symbol'),
                         'catalyst_data': candidate.get('catalyst_data', {})
                     }, method='POST')
                     
-                    if pattern_result.get('status') == 'success' or pattern_result.get('patterns'):
-                        patterns_analyzed += 1
-                
-                if patterns_analyzed > 0:
-                    self.current_cycle['patterns_analyzed'] = patterns_analyzed
-                    self.current_cycle['steps_completed'].append('pattern_analysis')
-                    log_workflow_step(cycle_id, 'pattern_analysis', 'completed',
-                                    records_processed=len(candidates[:5]),
-                                    records_output=patterns_analyzed)
+                    if pattern_result.get('status') == 'success':
+                        self.current_cycle['patterns_analyzed'] = \
+                            self.current_cycle.get('patterns_analyzed', 0) + 1
+                            
+                self.current_cycle['steps_completed'].append('pattern_analysis')
                 
                 # Step 4: Technical Analysis & Signal Generation
-                signals_generated = 0
                 for candidate in candidates[:5]:
                     signal_result = self.execute_step('technical', '/analyze', {
                         'symbol': candidate.get('symbol'),
-                        'catalyst_score': candidate.get('catalyst_score', candidate.get('composite_score', 0))
+                        'catalyst_score': candidate.get('catalyst_score', 0)
                     }, method='POST')
                     
                     if signal_result.get('signal'):
-                        signals_generated += 1
-                
-                if signals_generated > 0:
-                    self.current_cycle['signals_generated'] = signals_generated
-                    self.current_cycle['steps_completed'].append('signal_generation')
-                    log_workflow_step(cycle_id, 'signal_generation', 'completed',
-                                    records_processed=len(candidates[:5]),
-                                    records_output=signals_generated)
+                        self.current_cycle['signals_generated'] = \
+                            self.current_cycle.get('signals_generated', 0) + 1
+                            
+                self.current_cycle['steps_completed'].append('signal_generation')
                 
                 # Step 5: Trade Execution (if enabled)
-                if os.getenv('TRADING_ENABLED', 'false').lower() == 'true' and signals_generated > 0:
-                    log_workflow_step(cycle_id, 'trade_execution', 'started')
+                if os.getenv('TRADING_ENABLED', 'false').lower() == 'true':
+                    # Execute trades through trading service
                     trade_result = self.execute_step('trading', '/execute_signals', {
                         'cycle_id': cycle_id
                     }, method='POST')
                     
                     if trade_result.get('trades_executed'):
-                        self.current_cycle['trades_executed'] = trade_result.get('trades_executed', 0)
+                        self.current_cycle['trades_executed'] = \
+                            trade_result.get('trades_executed', 0)
                         self.current_cycle['steps_completed'].append('trade_execution')
-                        log_workflow_step(cycle_id, 'trade_execution', 'completed',
-                                        result=trade_result,
-                                        records_output=trade_result.get('trades_executed', 0))
-            else:
-                log_workflow_step(cycle_id, 'security_scanning', 'failed',
-                                error_message=scan_result.get('error', 'No candidates found'))
                         
             # Mark cycle as complete
             self.complete_cycle(cycle_id, 'completed')
@@ -425,8 +390,6 @@ class NewsDriverCoordinator:
             self.logger.error("Error in trading workflow", 
                             cycle_id=cycle_id, error=str(e))
             self.current_cycle['errors'].append(str(e))
-            log_workflow_step(cycle_id, 'workflow_error', 'failed',
-                            error_message=str(e))
             self.complete_cycle(cycle_id, 'failed', str(e))
             
     def execute_step(self, service_key: str, endpoint: str, 
@@ -478,22 +441,13 @@ class NewsDriverCoordinator:
                 'securities_scanned': self.current_cycle.get('candidates_selected', 0),
                 'patterns_analyzed': self.current_cycle.get('patterns_analyzed', 0),
                 'signals_generated': self.current_cycle.get('signals_generated', 0),
-                'trades_executed': self.current_cycle.get('trades_executed', 0),
-                'cycle_pnl': 0,  # Would be calculated from actual trades
-                'metadata': {
-                    'steps_completed': self.current_cycle.get('steps_completed', []),
-                    'errors': self.current_cycle.get('errors', [])
-                }
+                'trades_executed': self.current_cycle.get('trades_executed', 0)
             }
             
             if error:
                 updates['error_message'] = error
                 
             update_trading_cycle(cycle_id, updates)
-            
-            # Log workflow completion
-            log_workflow_step(cycle_id, 'workflow_complete', status,
-                            result={'duration_seconds': self.current_cycle['duration']})
             
             # Archive current cycle
             self.cycle_history.append(self.current_cycle.copy())
@@ -522,7 +476,7 @@ class NewsDriverCoordinator:
                         'last_check': datetime.now().isoformat(),
                         'response_time_ms': response_time
                     }
-                    update_service_health(service_info['name'], 'healthy', response_time)
+                    update_service_health(service_name, 'healthy', response_time)
                 else:
                     error_msg = f'HTTP {response.status_code}'
                     self.service_health[service_name] = {
@@ -530,7 +484,7 @@ class NewsDriverCoordinator:
                         'last_check': datetime.now().isoformat(),
                         'error': error_msg
                     }
-                    update_service_health(service_info['name'], 'unhealthy', 
+                    update_service_health(service_name, 'unhealthy', 
                                         response_time, error_msg)
                     
             except Exception as e:
@@ -540,7 +494,7 @@ class NewsDriverCoordinator:
                     'last_check': datetime.now().isoformat(),
                     'error': error_msg
                 }
-                update_service_health(service_info['name'], 'unreachable', 0, error_msg)
+                update_service_health(service_name, 'unreachable', 0, error_msg)
                 
     def start_health_monitor(self):
         """Start background health monitoring"""

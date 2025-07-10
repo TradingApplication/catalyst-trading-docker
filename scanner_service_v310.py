@@ -2,17 +2,11 @@
 """
 Name of Application: Catalyst Trading System
 Name of file: scanner_service.py
-Version: 3.1.1
+Version: 3.1.0
 Last Updated: 2025-07-10
 Purpose: Enhanced scanner with comprehensive market data collection
 
 REVISION HISTORY:
-v3.1.1 (2025-07-10) - Fixed import and service name issues
-- Fixed import of insert_trading_candidates
-- Added wrapper function for batch inserts
-- Fixed health endpoint syntax error
-- Changed service name to match coordination expectations
-
 v3.1.0 (2025-07-10) - Enhanced market data collection
 - Now stores ALL tracked securities to market_data table (not just top 20)
 - Added comprehensive market data fields (RSI, SMA, VWAP, etc.)
@@ -32,6 +26,21 @@ v3.0.0 (2025-01-27) - Enhanced for top 100 tracking
 - Maintains backward compatibility for trading top 5
 - Added security tracking state management
 - Implements collection frequency logic
+
+v2.1.0 (2025-07-01) - Production-ready refactor
+- Migrated from SQLite to PostgreSQL
+- All configuration via environment variables
+- Proper database connection pooling
+- Enhanced error handling
+- Added market data caching
+- Improved yfinance fallback handling
+
+v2.0.0 (2025-06-27) - Complete rewrite for dynamic scanning
+- Dynamic universe selection (50-100 stocks)
+- News catalyst integration
+- Multi-stage filtering (50 → 20 → 5)
+- Pre-market focus
+- Real-time narrowing throughout the day
 """
 
 # Standard library imports
@@ -68,46 +77,9 @@ except ImportError:
 
 # Only import what exists in database_utils
 from database_utils import (
-    get_db_connection, 
-    health_check,
-    get_active_candidates,
-    insert_trading_candidate  # Import singular version
+    get_db_connection, health_check,
+    get_active_candidates
 )
-
-
-def insert_trading_candidates(candidates: List[Dict], scan_id: str) -> int:
-    """
-    Insert multiple trading candidates - wrapper for database_utils function
-    """
-    count = 0
-    for candidate in candidates:
-        try:
-            # Prepare candidate data for the singular function
-            candidate_data = {
-                'symbol': candidate.get('symbol'),
-                'scan_type': 'enhanced',
-                'catalyst_score': candidate.get('composite_score', 0),
-                'catalyst_type': candidate.get('catalyst_type'),
-                'primary_news_id': candidate.get('primary_news_id'),
-                'volume_ratio': candidate.get('relative_volume', 1.0),
-                'price_change_pct': candidate.get('price_change_pct', 0),
-                'market_cap': candidate.get('market_cap', 0),
-                'selection_rank': candidate.get('rank', count + 1),
-                'metadata': {
-                    'scan_id': scan_id,
-                    'scan_timestamp': candidate.get('scan_timestamp', datetime.now()).isoformat(),
-                    'has_news': candidate.get('has_news', False),
-                    'news_count': candidate.get('news_count', 0)
-                }
-            }
-            insert_trading_candidate(candidate_data)
-            count += 1
-        except Exception as e:
-            logger = structlog.get_logger()
-            logger.error(f"Error inserting candidate {candidate.get('symbol')}: {e}")
-            continue
-    
-    return count
 
 
 class EnhancedDynamicSecurityScanner:
@@ -175,7 +147,7 @@ class EnhancedDynamicSecurityScanner:
         # Register with coordination
         self._register_with_coordination()
         
-        self.logger.info("Enhanced Dynamic Security Scanner v3.1.1 initialized",
+        self.logger.info("Enhanced Dynamic Security Scanner v3.1.0 initialized",
                         environment=os.getenv('ENVIRONMENT', 'development'),
                         tracking_size=self.scan_params['top_tracking_size'])
         
@@ -187,7 +159,7 @@ class EnhancedDynamicSecurityScanner:
         os.makedirs(self.log_path, exist_ok=True)
         os.makedirs(self.data_path, exist_ok=True)
         
-        self.service_name = 'scanner_service'  # Changed to match coordination expectations
+        self.service_name = 'enhanced_security_scanner'
         self.port = int(os.getenv('PORT', '5001'))
         self.log_level = os.getenv('LOG_LEVEL', 'INFO')
         
@@ -203,12 +175,12 @@ class EnhancedDynamicSecurityScanner:
             db_health = health_check()
             return jsonify({
                 "status": "healthy" if db_health['postgresql']['status'] == 'healthy' else "degraded",
-                "service": "scanner_service",  # Changed to match coordination expectations
-                "version": "3.1.1",
+                "service": "enhanced_security_scanner",
+                "version": "3.1.0",
                 "mode": "top-100-tracking",
                 "tracking_count": len(self.tracking_state),
-                "database": db_health['postgresql']['status'],
-                "redis": db_health['redis']['status'],  # Fixed double comma
+                "database": db_health['postgresql']['status'] ,
+                "redis": db_health['redis']['status'],,
                 "timestamp": datetime.now().isoformat()
             })
             
@@ -277,7 +249,6 @@ class EnhancedDynamicSecurityScanner:
             # Step 5: Update tracking state
             for i, candidate in enumerate(top_100):
                 symbol = candidate['symbol']
-                candidate['rank'] = i + 1  # Add rank to candidate
                 self.tracking_state[symbol] = {
                     'symbol': symbol,
                     'last_updated': datetime.now(),
@@ -377,8 +348,6 @@ class EnhancedDynamicSecurityScanner:
                 'volume': int(current_volume),
                 'average_volume': int(volumes[-20:].mean()) if len(volumes) >= 20 else int(current_volume),
                 'market_cap': info.get('marketCap', 0),
-                'sector': info.get('sector', 'Unknown'),
-                'industry': info.get('industry', 'Unknown'),
                 'news_count': 0,
                 'has_news': False,
                 **technical_data
@@ -542,52 +511,13 @@ class EnhancedDynamicSecurityScanner:
         conn = self.db_pool.getconn()
         try:
             with conn.cursor() as cursor:
-                # Create table if it doesn't exist
-                cursor.execute("""
-                    CREATE TABLE IF NOT EXISTS scan_market_data (
-                        scan_id VARCHAR(100),
-                        symbol VARCHAR(10),
-                        scan_timestamp TIMESTAMPTZ,
-                        price DECIMAL(10,2),
-                        open_price DECIMAL(10,2),
-                        high_price DECIMAL(10,2),
-                        low_price DECIMAL(10,2),
-                        previous_close DECIMAL(10,2),
-                        volume BIGINT,
-                        average_volume BIGINT,
-                        relative_volume DECIMAL(10,2),
-                        dollar_volume DECIMAL(20,2),
-                        price_change DECIMAL(10,2),
-                        price_change_pct DECIMAL(10,2),
-                        gap_pct DECIMAL(10,2),
-                        day_range_pct DECIMAL(10,2),
-                        rsi_14 DECIMAL(5,2),
-                        sma_20 DECIMAL(10,2),
-                        sma_50 DECIMAL(10,2),
-                        vwap DECIMAL(10,2),
-                        has_news BOOLEAN,
-                        news_count INTEGER,
-                        catalyst_score DECIMAL(10,2),
-                        primary_catalyst TEXT,
-                        news_recency_hours INTEGER,
-                        scan_rank INTEGER,
-                        made_top_20 BOOLEAN,
-                        made_top_5 BOOLEAN,
-                        selected_for_trading BOOLEAN,
-                        market_cap BIGINT,
-                        sector VARCHAR(100),
-                        industry VARCHAR(100),
-                        PRIMARY KEY (scan_id, symbol)
-                    )
-                """)
-                
                 # Prepare batch insert data
                 insert_data = []
                 
                 for i, security in enumerate(securities):
                     try:
                         # Determine catalyst score
-                        catalyst_score = security.get('composite_score', 0) * (security.get('news_count', 0) / 10) if security.get('news_count', 0) > 0 else 0
+                        catalyst_score = security.get('composite_score', 0) * (security.get('news_count', 0) / 10)
                         
                         insert_data.append((
                             scan_id,
@@ -650,20 +580,6 @@ class EnhancedDynamicSecurityScanner:
                 # Also store high-frequency data for top securities
                 for security in securities[:20]:
                     try:
-                        # Create table if it doesn't exist
-                        cursor.execute("""
-                            CREATE TABLE IF NOT EXISTS security_data_high_freq (
-                                symbol VARCHAR(10),
-                                timestamp TIMESTAMPTZ,
-                                close DECIMAL(10,2),
-                                volume BIGINT,
-                                news_count INTEGER,
-                                catalyst_active BOOLEAN,
-                                catalyst_score DECIMAL(10,2),
-                                PRIMARY KEY (symbol, timestamp)
-                            )
-                        """)
-                        
                         cursor.execute("""
                             INSERT INTO security_data_high_freq (
                                 symbol, timestamp, close, volume,
@@ -671,7 +587,6 @@ class EnhancedDynamicSecurityScanner:
                             ) VALUES (
                                 %s, %s, %s, %s, %s, %s, %s
                             )
-                            ON CONFLICT (symbol, timestamp) DO NOTHING
                         """, (
                             security['symbol'],
                             security.get('scan_timestamp', datetime.now()),
@@ -698,18 +613,6 @@ class EnhancedDynamicSecurityScanner:
         conn = self.db_pool.getconn()
         try:
             with conn.cursor() as cursor:
-                # Create aggregation function if it doesn't exist
-                cursor.execute("""
-                    CREATE OR REPLACE FUNCTION update_scan_market_data_daily()
-                    RETURNS void AS $$
-                    BEGIN
-                        -- Placeholder for aggregation logic
-                        -- This would aggregate scan_market_data into daily summaries
-                        RETURN;
-                    END;
-                    $$ LANGUAGE plpgsql;
-                """)
-                
                 # Call the aggregation function
                 cursor.execute("SELECT update_scan_market_data_daily()")
                 conn.commit()
@@ -726,17 +629,6 @@ class EnhancedDynamicSecurityScanner:
         try:
             conn = self.db_pool.getconn()
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-                # Create table if it doesn't exist
-                cursor.execute("""
-                    CREATE TABLE IF NOT EXISTS security_tracking_state (
-                        symbol VARCHAR(10) PRIMARY KEY,
-                        last_updated TIMESTAMPTZ,
-                        collection_frequency VARCHAR(20),
-                        last_score DECIMAL(10,2),
-                        rank INTEGER
-                    )
-                """)
-                
                 cursor.execute("""
                     SELECT * FROM security_tracking_state
                     WHERE collection_frequency != 'archive'
@@ -780,11 +672,11 @@ class EnhancedDynamicSecurityScanner:
             response = requests.post(
                 f"{self.coordination_url}/register_service",
                 json={
-                    'service_name': 'scanner_service',  # Changed to match coordination expectations
+                    'service_name': 'enhanced_security_scanner',
                     'service_info': {
                         'url': f"http://scanner-service:{self.port}",
                         'port': self.port,
-                        'version': '3.1.1',
+                        'version': '3.1.0',
                         'capabilities': ['top_100_tracking', 'pattern_data_collection', 'comprehensive_market_data']
                     }
                 },
@@ -808,7 +700,7 @@ class EnhancedDynamicSecurityScanner:
     def run(self):
         """Start the scanner service"""
         self.logger.info("Starting Enhanced Dynamic Security Scanner",
-                        version="3.1.1",
+                        version="3.1.0",
                         port=self.port,
                         environment=os.getenv('ENVIRONMENT', 'development'))
         
