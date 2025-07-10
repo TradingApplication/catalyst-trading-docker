@@ -2,15 +2,11 @@
 """
 Name of Application: Catalyst Trading System
 Name of file: database_utils.py
-Version: 2.3.8
+Version: 2.3.7
 Last Updated: 2025-07-10
 Purpose: COMPLETE database utilities with ALL service functions
 
 REVISION HISTORY:
-v2.3.8 (2025-07-10) - Fixed SQL syntax error
-- Fixed log_workflow_step UPDATE query for PostgreSQL compatibility
-- Changed to use subquery instead of ORDER BY in UPDATE
-
 v2.3.7 (2025-07-10) - FINAL COMPLETE VERSION
 - Added log_workflow_step function
 - Added update_service_health function
@@ -336,12 +332,8 @@ def update_trading_cycle(cycle_id: str, updates: Dict) -> bool:
                 values = []
                 for key, value in updates.items():
                     if key not in ['cycle_id', 'created_at']:  # Prevent updating primary key
-                        if key == 'metadata' and isinstance(value, dict):
-                            set_clauses.append(f"{key} = %s::jsonb")
-                            values.append(json.dumps(value))
-                        else:
-                            set_clauses.append(f"{key} = %s")
-                            values.append(value)
+                        set_clauses.append(f"{key} = %s")
+                        values.append(value)
                 
                 if not set_clauses:
                     return False
@@ -423,7 +415,7 @@ def get_current_cycle() -> Optional[Dict]:
 
 
 # =============================================================================
-# WORKFLOW LOGGING FUNCTIONS - FIXED VERSION
+# WORKFLOW LOGGING FUNCTIONS
 # =============================================================================
 
 def log_workflow_step(cycle_id: str, step_name: str, status: str, 
@@ -488,7 +480,6 @@ def log_workflow_step(cycle_id: str, step_name: str, status: str,
                     
                 else:
                     # Completing or failing a step - update existing record
-                    # Use a subquery to find the ID of the record to update
                     cur.execute("""
                         UPDATE workflow_log 
                         SET status = %s,
@@ -498,14 +489,11 @@ def log_workflow_step(cycle_id: str, step_name: str, status: str,
                             records_output = %s,
                             result = %s,
                             error_message = %s
-                        WHERE id = (
-                            SELECT id FROM workflow_log
-                            WHERE cycle_id = %s 
-                            AND step_name = %s
-                            AND status = 'started'
-                            ORDER BY start_time DESC
-                            LIMIT 1
-                        )
+                        WHERE cycle_id = %s 
+                        AND step_name = %s
+                        AND status = 'started'
+                        ORDER BY start_time DESC
+                        LIMIT 1
                         RETURNING id
                     """, (
                         status,
@@ -1097,34 +1085,27 @@ def get_active_candidates(scan_type: Optional[str] = None) -> List[Dict]:
     try:
         with get_db_connection() as conn:
             with conn.cursor() as cur:
-                # Create default query
-                base_query = """
-                    SELECT 
-                        tc.*,
-                        EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - tc.created_at)) as age_seconds
-                    FROM trading_candidates tc
-                """
-                
-                # Add WHERE conditions
-                conditions = ["created_at > CURRENT_TIMESTAMP - INTERVAL '1 hour'"]
-                params = []
-                
                 if scan_type:
-                    conditions.append("scan_type = %s")
-                    params.append(scan_type)
-                
-                query = base_query + " WHERE " + " AND ".join(conditions)
-                query += " ORDER BY catalyst_score DESC, selection_rank ASC LIMIT 10"
-                
-                cur.execute(query, params)
+                    cur.execute("""
+                        SELECT * FROM trading_candidates
+                        WHERE scan_type = %s
+                        AND scan_timestamp > CURRENT_TIMESTAMP - INTERVAL '1 hour'
+                        ORDER BY catalyst_score DESC, selection_rank ASC
+                        LIMIT 10
+                    """, (scan_type,))
+                else:
+                    cur.execute("""
+                        SELECT * FROM trading_candidates
+                        WHERE scan_timestamp > CURRENT_TIMESTAMP - INTERVAL '1 hour'
+                        ORDER BY catalyst_score DESC, selection_rank ASC
+                        LIMIT 10
+                    """)
                 
                 candidates = []
                 for row in cur.fetchall():
                     candidate = dict(row)
-                    # Convert timestamps
-                    for field in ['scan_timestamp', 'created_at']:
-                        if candidate.get(field):
-                            candidate[field] = candidate[field].isoformat()
+                    if candidate.get('scan_timestamp'):
+                        candidate['scan_timestamp'] = candidate['scan_timestamp'].isoformat()
                     candidates.append(candidate)
                 
                 return candidates
