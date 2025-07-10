@@ -12,51 +12,70 @@ if [ ! -f "add_market_data_tables.sql" ]; then
     exit 1
 fi
 
-# Method 1: Using DATABASE_URL from environment
-if [ -n "$DATABASE_URL" ]; then
-    echo "Using DATABASE_URL from environment..."
-    psql "$DATABASE_URL" < add_market_data_tables.sql
-    
-    if [ $? -eq 0 ]; then
-        echo "✅ Migration completed successfully!"
-    else
-        echo "❌ Migration failed. Trying alternative method..."
-        
-        # Method 2: Extract components and use flags
-        echo "Attempting connection with extracted components..."
-        
-        # Extract components from DATABASE_URL
-        # Format: postgresql://user:password@host:port/database?sslmode=require
-        if [[ $DATABASE_URL =~ postgresql://([^:]+):([^@]+)@([^:]+):([^/]+)/([^?]+) ]]; then
-            DB_USER="${BASH_REMATCH[1]}"
-            DB_PASS="${BASH_REMATCH[2]}"
-            DB_HOST="${BASH_REMATCH[3]}"
-            DB_PORT="${BASH_REMATCH[4]}"
-            DB_NAME="${BASH_REMATCH[5]}"
-            
-            PGPASSWORD="$DB_PASS" psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" --set=sslmode=require < add_market_data_tables.sql
-            
-            if [ $? -eq 0 ]; then
-                echo "✅ Migration completed successfully!"
-            else
-                echo "❌ Migration failed with both methods."
-                exit 1
-            fi
-        else
-            echo "❌ Could not parse DATABASE_URL"
-            exit 1
-        fi
-    fi
-else
-    echo "Error: DATABASE_URL not set!"
+# Check if environment variables are set
+if [ -z "$DATABASE_HOST" ] || [ -z "$DATABASE_USER" ] || [ -z "$DATABASE_PASSWORD" ] || [ -z "$DATABASE_NAME" ]; then
+    echo "Error: Database environment variables not set!"
     echo ""
-    echo "Please either:"
-    echo "1. Source your .env file: source .env"
-    echo "2. Or export DATABASE_URL manually:"
-    echo "   export DATABASE_URL='postgresql://user:password@host:port/database?sslmode=require'"
+    echo "Please source your .env file first:"
+    echo "  source .env"
+    echo ""
+    echo "Required variables:"
+    echo "  DATABASE_HOST"
+    echo "  DATABASE_PORT (optional, defaults to 5432)"
+    echo "  DATABASE_USER"
+    echo "  DATABASE_PASSWORD"
+    echo "  DATABASE_NAME"
+    exit 1
+fi
+
+# Set default port if not provided
+DATABASE_PORT=${DATABASE_PORT:-5432}
+
+echo "Connecting to database..."
+echo "  Host: $DATABASE_HOST"
+echo "  Port: $DATABASE_PORT"
+echo "  Database: $DATABASE_NAME"
+echo "  User: $DATABASE_USER"
+echo ""
+
+# Run the migration using individual parameters
+PGPASSWORD="$DATABASE_PASSWORD" psql \
+    -h "$DATABASE_HOST" \
+    -p "$DATABASE_PORT" \
+    -U "$DATABASE_USER" \
+    -d "$DATABASE_NAME" \
+    --set=sslmode=require \
+    < add_market_data_tables.sql
+
+if [ $? -eq 0 ]; then
+    echo ""
+    echo "✅ Migration completed successfully!"
+    echo ""
+    echo "Verifying tables were created..."
+    
+    # Check if tables exist
+    PGPASSWORD="$DATABASE_PASSWORD" psql \
+        -h "$DATABASE_HOST" \
+        -p "$DATABASE_PORT" \
+        -U "$DATABASE_USER" \
+        -d "$DATABASE_NAME" \
+        --set=sslmode=require \
+        -c "\dt market_data*" \
+        -c "SELECT COUNT(*) as table_count FROM pg_tables WHERE tablename LIKE 'market_data%';"
+else
+    echo ""
+    echo "❌ Migration failed!"
+    echo ""
+    echo "Common issues:"
+    echo "1. Check your database credentials in .env"
+    echo "2. Ensure the database host is accessible"
+    echo "3. Verify SSL mode is enabled on your DigitalOcean database"
+    echo "4. Check if you have CREATE TABLE permissions"
     exit 1
 fi
 
 echo ""
-echo "To verify the tables were created, run:"
-echo "psql \"\$DATABASE_URL\" -c '\\dt market_data*'"
+echo "Next steps:"
+echo "1. Restart the scanner service to use the new tables"
+echo "2. Monitor logs for any data storage issues"
+echo "3. Check data is being stored: psql ... -c 'SELECT COUNT(*) FROM market_data;'"
