@@ -32,7 +32,8 @@ docker system prune -a --volumes -f
 # Clear builder cache specifically
 docker builder prune -a -f
 
-# Now build with no cache
+# Full rebuild from scratch - build with no cache
+# ------------------------------------------------
 docker-compose build --no-cache --pull
 
 
