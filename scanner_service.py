@@ -78,7 +78,7 @@ except ImportError:
 # Only import what exists in database_utils
 from database_utils import (
     get_db_connection, health_check,
-    insert_trading_candidates, get_active_candidates
+    get_active_candidates
 )
 
 
@@ -174,13 +174,13 @@ class EnhancedDynamicSecurityScanner:
         def health():
             db_health = health_check()
             return jsonify({
-                "status": "healthy" if db_health['database'] == 'healthy' else "degraded",
+                "status": "healthy" if db_health['postgresql']['status'] == 'healthy' else "degraded",
                 "service": "enhanced_security_scanner",
                 "version": "3.1.0",
                 "mode": "top-100-tracking",
                 "tracking_count": len(self.tracking_state),
-                "database": db_health['database'],
-                "redis": db_health['redis'],
+                "database": db_health['postgresql']['status'] ,
+                "redis": db_health['redis']['status'],,
                 "timestamp": datetime.now().isoformat()
             })
             

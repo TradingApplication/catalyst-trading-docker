@@ -2,15 +2,11 @@
 """
 Name of Application: Catalyst Trading System
 Name of file: coordination_service.py
-Version: 2.1.1
-Last Updated: 2025-07-10
+Version: 2.1.0
+Last Updated: 2025-07-01
 Purpose: Orchestrate news-driven trading workflow with PostgreSQL and environment variables
 
 REVISION HISTORY:
-v2.1.1 (2025-07-10) - Fixed health check endpoint
-- Fixed KeyError: 'database' by using correct key 'postgresql'
-- Maintained compatibility with database_utils health_check response
-
 v2.1.0 (2025-07-01) - Major refactor for production deployment
 - Migrated from SQLite to PostgreSQL
 - All configuration via environment variables
@@ -31,115 +27,82 @@ This service coordinates the news-driven workflow:
 """
 
 import os
-import sys
 import json
 import time
 import logging
-import threading
-import schedule
 import requests
+import threading
 from datetime import datetime, timedelta
 from flask import Flask, request, jsonify
 from typing import Dict, List, Optional, Any
+import schedule
 from structlog import get_logger
-import redis
-from dotenv import load_dotenv
 
-# Load environment variables
-load_dotenv()
-
-# Import database utilities
-try:
-    from database_utils import (
-        get_db_connection,
-        insert_trading_cycle,
-        update_trading_cycle,
-        update_service_health,
-        get_service_health_history,
-        health_check,
-        get_redis
-    )
-except ImportError as e:
-    print(f"Import error: {e}")
-    print("Attempting basic import...")
-    from database_utils import get_db_connection, health_check, get_redis
-    
-    # Define missing functions if not available
-    def insert_trading_cycle(cycle_data):
-        return cycle_data.get('cycle_id', 'CYCLE_STUB')
-    
-    def update_trading_cycle(cycle_id, updates):
-        pass
-    
-    def update_service_health(service_name, status, response_time, error=None):
-        pass
-    
-    def get_service_health_history(hours=24):
-        return []
+# Import proper database utilities
+from database_utils import (
+    get_db_connection,
+    create_trading_cycle,
+    update_trading_cycle,
+    log_workflow_step,
+    update_service_health,
+    get_configuration,
+    health_check
+)
 
 
-class NewsDriverCoordinator:
+class CoordinationService:
     """
-    Coordinates the news-driven trading workflow
+    Coordination service for news-driven trading system
+    Orchestrates workflow from news to trades
     """
     
     def __init__(self):
-        # Initialize environment
+        # Initialize environment variables
         self.setup_environment()
         
         self.app = Flask(__name__)
         self.setup_logging()
         self.setup_routes()
         
-        # Initialize Redis client
-        self.redis_client = get_redis()
-        
-        # Service registry with enhanced URLs
+        # Service registry with environment-based URLs
         self.services = {
-            'news': {
-                'name': 'news_service',
+            'news_collection': {
                 'url': os.getenv('NEWS_SERVICE_URL', 'http://news-service:5008'),
                 'port': 5008,
                 'required': True,
                 'health_check': '/health'
             },
-            'scanner': {
-                'name': '   "service": "scanner_service",', 
+            'security_scanner': {
                 'url': os.getenv('SCANNER_SERVICE_URL', 'http://scanner-service:5001'),
                 'port': 5001,
                 'required': True,
                 'health_check': '/health'
             },
-            'pattern': {
-                'name': 'pattern_service',
+            'pattern_analysis': {
                 'url': os.getenv('PATTERN_SERVICE_URL', 'http://pattern-service:5002'),
                 'port': 5002,
                 'required': True,
                 'health_check': '/health'
             },
-            'technical': {
-                'name': 'technical_service',
+            'technical_analysis': {
                 'url': os.getenv('TECHNICAL_SERVICE_URL', 'http://technical-service:5003'),
                 'port': 5003,
                 'required': True,
                 'health_check': '/health'
             },
-            'trading': {
-                'name': 'trading_service',
+            'paper_trading': {
                 'url': os.getenv('TRADING_SERVICE_URL', 'http://trading-service:5005'),
                 'port': 5005,
                 'required': True,
                 'health_check': '/health'
             },
             'reporting': {
-                'name': 'reporting_service',
                 'url': os.getenv('REPORTING_SERVICE_URL', 'http://reporting-service:5009'),
                 'port': 5009,
                 'required': False,
                 'health_check': '/health'
             },
-            'dashboard': {
-                'name': 'dashboard_service',
+            'web_dashboard': {
                 'url': os.getenv('DASHBOARD_SERVICE_URL', 'http://web-dashboard:5010'),
                 'port': 5010,
                 'required': False,
@@ -183,7 +146,7 @@ class NewsDriverCoordinator:
         self.start_health_monitor()
         self.start_scheduler()
         
-        self.logger.info("Coordination Service v2.1.1 initialized", 
+        self.logger.info("Coordination Service v2.1.0 initialized", 
                         environment=os.getenv('ENVIRONMENT', 'development'))
         
     def setup_environment(self):
@@ -211,14 +174,13 @@ class NewsDriverCoordinator:
         @self.app.route('/health', methods=['GET'])
         def health():
             db_health = health_check()
-            # Fixed: Use 'postgresql' key instead of 'database'
             return jsonify({
-                "status": "healthy" if db_health['postgresql']['status'] == 'healthy' else "degraded",
+                "status": "healthy" if db_health['database'] == 'healthy' else "degraded",
                 "service": "coordination",
-                "version": "2.1.1",
+                "version": "2.1.0",
                 "mode": "news-driven",
-                "database": db_health['postgresql']['status'],
-                "redis": db_health['redis']['status'],
+                "database": db_health['database'],
+                "redis": db_health['redis'],
                 "timestamp": datetime.now().isoformat()
             })
             
@@ -264,49 +226,41 @@ class NewsDriverCoordinator:
             
         @self.app.route('/service_health', methods=['GET'])
         def service_health():
-            """Get health of all services"""
-            self.check_service_health()
+            """Get health status of all services"""
             return jsonify({
                 'services': self.service_health,
-                'timestamp': datetime.now().isoformat()
+                'last_check': datetime.now().isoformat()
             })
             
-        @self.app.route('/workflow_status', methods=['GET'])
-        def workflow_status():
-            """Get current workflow configuration and status"""
-            return jsonify({
-                'config': self.workflow_config,
-                'current_cycle': self.current_cycle,
-                'cycle_history': self.cycle_history[-10:],  # Last 10 cycles
-                'timestamp': datetime.now().isoformat()
-            })
-            
-    def start_new_cycle(self, mode: str) -> Dict:
+        @self.app.route('/workflow_config', methods=['GET', 'POST'])
+        def workflow_config():
+            """Get or update workflow configuration"""
+            if request.method == 'GET':
+                return jsonify(self.workflow_config)
+            else:
+                self.workflow_config.update(request.json)
+                return jsonify({
+                    'status': 'updated',
+                    'config': self.workflow_config
+                })
+                
+    def start_new_cycle(self, mode: str = 'normal') -> Dict:
         """Start a new trading cycle"""
         try:
-            cycle_id = f"CYCLE_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{mode}"
+            # Create cycle in database
+            cycle_id = create_trading_cycle(mode)
             
             self.current_cycle = {
                 'cycle_id': cycle_id,
-                'mode': mode,
+                'start_time': datetime.now().isoformat(),
                 'status': 'running',
-                'start_time': datetime.now(),
-                'steps_completed': [],
-                'errors': []
+                'mode': mode,
+                'progress': {}
             }
             
-            # Save to database
-            cycle_data = {
-                'cycle_id': cycle_id,
-                'mode': mode,
-                'status': 'running',
-                'start_time': datetime.now()
-            }
-            insert_trading_cycle(cycle_data)
-            
-            # Start workflow in background
+            # Start workflow in background thread
             thread = threading.Thread(
-                target=self.run_trading_workflow,
+                target=self.execute_trading_workflow, 
                 args=(cycle_id, mode)
             )
             thread.daemon = True
@@ -315,123 +269,194 @@ class NewsDriverCoordinator:
             return self.current_cycle
             
         except Exception as e:
-            self.logger.error("Error starting cycle", error=str(e))
-            return {'error': str(e)}
-            
-    def run_trading_workflow(self, cycle_id: str, mode: str):
-        """Execute the complete trading workflow"""
+            self.logger.error("Failed to start cycle", error=str(e))
+            raise
+        
+    def execute_trading_workflow(self, cycle_id: str, mode: str):
+        """
+        Execute the complete news-driven trading workflow
+        """
+        self.logger.info("Starting trading workflow", 
+                        cycle_id=cycle_id, 
+                        mode=mode)
+        
         try:
-            self.logger.info("Starting trading workflow", 
-                           cycle_id=cycle_id, mode=mode)
-            
             # Step 1: Collect News
-            news_result = self.execute_step('news', '/collect', {
-                'mode': mode,
-                'cycle_id': cycle_id
-            })
+            workflow_id = log_workflow_step(cycle_id, 'news_collection', 'started')
+            news_result = self.collect_news(mode)
+            self.current_cycle['news_collected'] = news_result.get('articles_collected', 0)
+            log_workflow_step(cycle_id, 'news_collection', 'completed', news_result)
             
-            if news_result.get('status') == 'success':
-                self.current_cycle['news_collected'] = news_result.get('articles_collected', 0)
-                self.current_cycle['steps_completed'].append('news_collection')
-                
-            # Step 2: Security Scanning
-            scan_result = self.execute_step('scanner', '/scan', {
-                'mode': mode,
-                'force': 'true'
-            })
+            # Step 2: Scan Securities (News-Driven)
+            workflow_id = log_workflow_step(cycle_id, 'security_scanning', 'started')
+            scan_result = self.scan_securities(mode)
+            self.current_cycle['candidates_selected'] = len(scan_result.get('final_picks', []))
+            log_workflow_step(cycle_id, 'security_scanning', 'completed', scan_result)
             
-            if scan_result.get('status') == 'success' or scan_result.get('final_picks'):
-                candidates = scan_result.get('final_picks', [])
-                self.current_cycle['candidates_selected'] = len(candidates)
-                self.current_cycle['steps_completed'].append('security_scanning')
+            # Step 3: Analyze Patterns on Selected Securities
+            if scan_result.get('final_picks'):
+                workflow_id = log_workflow_step(cycle_id, 'pattern_analysis', 'started')
+                patterns = self.analyze_patterns(scan_result['final_picks'])
+                self.current_cycle['patterns_analyzed'] = len(patterns)
+                log_workflow_step(cycle_id, 'pattern_analysis', 'completed', patterns)
                 
-                # Step 3: Pattern Analysis for each candidate
-                for candidate in candidates[:5]:  # Top 5 only
-                    pattern_result = self.execute_step('pattern', '/analyze_pattern', {
-                        'symbol': candidate.get('symbol'),
-                        'catalyst_data': candidate.get('catalyst_data', {})
-                    }, method='POST')
-                    
-                    if pattern_result.get('status') == 'success':
-                        self.current_cycle['patterns_analyzed'] = \
-                            self.current_cycle.get('patterns_analyzed', 0) + 1
-                            
-                self.current_cycle['steps_completed'].append('pattern_analysis')
+                # Step 4: Generate Trading Signals
+                workflow_id = log_workflow_step(cycle_id, 'signal_generation', 'started')
+                signals = self.generate_signals(scan_result['final_picks'], patterns)
+                self.current_cycle['signals_generated'] = len(signals)
+                log_workflow_step(cycle_id, 'signal_generation', 'completed', signals)
                 
-                # Step 4: Technical Analysis & Signal Generation
-                for candidate in candidates[:5]:
-                    signal_result = self.execute_step('technical', '/analyze', {
-                        'symbol': candidate.get('symbol'),
-                        'catalyst_score': candidate.get('catalyst_score', 0)
-                    }, method='POST')
-                    
-                    if signal_result.get('signal'):
-                        self.current_cycle['signals_generated'] = \
-                            self.current_cycle.get('signals_generated', 0) + 1
-                            
-                self.current_cycle['steps_completed'].append('signal_generation')
-                
-                # Step 5: Trade Execution (if enabled)
-                if os.getenv('TRADING_ENABLED', 'false').lower() == 'true':
-                    # Execute trades through trading service
-                    trade_result = self.execute_step('trading', '/execute_signals', {
-                        'cycle_id': cycle_id
-                    }, method='POST')
-                    
-                    if trade_result.get('trades_executed'):
-                        self.current_cycle['trades_executed'] = \
-                            trade_result.get('trades_executed', 0)
-                        self.current_cycle['steps_completed'].append('trade_execution')
-                        
-            # Mark cycle as complete
+                # Step 5: Execute Trades
+                if signals:
+                    workflow_id = log_workflow_step(cycle_id, 'trade_execution', 'started')
+                    trades = self.execute_trades(signals)
+                    self.current_cycle['trades_executed'] = len(trades)
+                    log_workflow_step(cycle_id, 'trade_execution', 'completed', trades)
+            
+            # Step 6: Update Cycle Complete
             self.complete_cycle(cycle_id, 'completed')
             
         except Exception as e:
-            self.logger.error("Error in trading workflow", 
-                            cycle_id=cycle_id, error=str(e))
-            self.current_cycle['errors'].append(str(e))
+            self.logger.error("Workflow error", 
+                            cycle_id=cycle_id,
+                            error=str(e))
             self.complete_cycle(cycle_id, 'failed', str(e))
             
-    def execute_step(self, service_key: str, endpoint: str, 
-                    data: Dict, method: str = 'GET') -> Dict:
-        """Execute a workflow step"""
+    def collect_news(self, mode: str) -> Dict:
+        """Trigger news collection"""
         try:
-            service = self.services.get(service_key)
-            if not service:
-                raise ValueError(f"Unknown service: {service_key}")
-                
-            url = f"{service['url']}{endpoint}"
+            response = requests.post(
+                f"{self.services['news_collection']['url']}/collect_news",
+                json={'sources': 'all', 'mode': mode},
+                timeout=30
+            )
             
-            if method == 'GET':
-                response = requests.get(url, params=data, timeout=30)
-            else:
-                response = requests.post(url, json=data, timeout=30)
-                
             if response.status_code == 200:
                 return response.json()
             else:
-                error_msg = f"Service returned {response.status_code}"
-                self.logger.error("Step execution failed", 
-                                service=service_key,
-                                endpoint=endpoint,
-                                error=error_msg)
-                return {'status': 'error', 'error': error_msg}
+                return {'error': f'News collection failed: {response.status_code}'}
                 
         except Exception as e:
-            self.logger.error("Step execution error",
-                            service=service_key,
-                            endpoint=endpoint,
-                            error=str(e))
-            return {'status': 'error', 'error': str(e)}
+            self.logger.error("News collection error", error=str(e))
+            return {'error': str(e)}
             
-    def complete_cycle(self, cycle_id: str, status: str, error: str = None):
+    def scan_securities(self, mode: str) -> Dict:
+        """Scan for trading candidates based on news"""
+        try:
+            endpoint = '/scan_premarket' if mode == 'aggressive' else '/scan'
+            response = requests.get(
+                f"{self.services['security_scanner']['url']}{endpoint}",
+                timeout=30
+            )
+            
+            if response.status_code == 200:
+                return response.json()
+            else:
+                return {'error': f'Scanner failed: {response.status_code}'}
+                
+        except Exception as e:
+            self.logger.error("Scanner error", error=str(e))
+            return {'error': str(e)}
+            
+    def analyze_patterns(self, candidates: List[Dict]) -> List[Dict]:
+        """Analyze patterns for selected candidates"""
+        patterns = []
+        
+        for candidate in candidates:
+            try:
+                response = requests.post(
+                    f"{self.services['pattern_analysis']['url']}/analyze_pattern",
+                    json={
+                        'symbol': candidate['symbol'],
+                        'timeframe': '5min',
+                        'context': {
+                            'has_catalyst': True,
+                            'catalyst_type': candidate.get('catalysts', [])[0] if candidate.get('catalysts') else None,
+                            'market_state': 'pre-market' if candidate.get('has_pre_market_news') else 'regular'
+                        }
+                    },
+                    timeout=10
+                )
+                
+                if response.status_code == 200:
+                    pattern_data = response.json()
+                    pattern_data['symbol'] = candidate['symbol']
+                    patterns.append(pattern_data)
+                    
+            except Exception as e:
+                self.logger.error("Pattern analysis error",
+                                symbol=candidate['symbol'],
+                                error=str(e))
+                
+        return patterns
+        
+    def generate_signals(self, candidates: List[Dict], patterns: List[Dict]) -> List[Dict]:
+        """Generate trading signals"""
+        signals = []
+        
+        # Match patterns to candidates
+        pattern_map = {p['symbol']: p for p in patterns}
+        
+        for candidate in candidates:
+            try:
+                pattern_data = pattern_map.get(candidate['symbol'], {})
+                
+                response = requests.post(
+                    f"{self.services['technical_analysis']['url']}/generate_signal",
+                    json={
+                        'symbol': candidate['symbol'],
+                        'patterns': pattern_data.get('patterns', []),
+                        'catalyst_data': {
+                            'score': candidate.get('catalyst_score', 0),
+                            'type': candidate.get('catalysts', [])[0] if candidate.get('catalysts') else None
+                        }
+                    },
+                    timeout=10
+                )
+                
+                if response.status_code == 200:
+                    signal = response.json()
+                    if signal.get('signal') in ['BUY', 'SELL']:
+                        signals.append(signal)
+                        
+            except Exception as e:
+                self.logger.error("Signal generation error",
+                                symbol=candidate['symbol'],
+                                error=str(e))
+                
+        return signals
+        
+    def execute_trades(self, signals: List[Dict]) -> List[Dict]:
+        """Execute trades via paper trading service"""
+        trades = []
+        
+        for signal in signals:
+            try:
+                response = requests.post(
+                    f"{self.services['paper_trading']['url']}/execute_trade",
+                    json=signal,
+                    timeout=10
+                )
+                
+                if response.status_code == 200:
+                    trade = response.json()
+                    trades.append(trade)
+                    self.logger.info("Trade executed",
+                                   symbol=signal['symbol'],
+                                   trade_id=trade.get('trade_id'))
+                    
+            except Exception as e:
+                self.logger.error("Trade execution error",
+                                symbol=signal['symbol'],
+                                error=str(e))
+                
+        return trades
+        
+    def complete_cycle(self, cycle_id: str, status: str, error: Optional[str] = None):
         """Complete a trading cycle"""
         try:
             self.current_cycle['status'] = status
-            self.current_cycle['end_time'] = datetime.now()
-            self.current_cycle['duration'] = (
-                self.current_cycle['end_time'] - self.current_cycle['start_time']
-            ).total_seconds()
+            self.current_cycle['end_time'] = datetime.now().isoformat()
             
             # Update database
             updates = {
@@ -494,16 +519,14 @@ class NewsDriverCoordinator:
                     'last_check': datetime.now().isoformat(),
                     'error': error_msg
                 }
-                update_service_health(service_name, 'unreachable', 0, error_msg)
+                update_service_health(service_name, 'unreachable', 
+                                    None, error_msg)
                 
     def start_health_monitor(self):
         """Start background health monitoring"""
         def monitor():
             while True:
-                try:
-                    self.check_service_health()
-                except Exception as e:
-                    self.logger.error("Health monitor error", error=str(e))
+                self.check_service_health()
                 time.sleep(30)  # Check every 30 seconds
                 
         thread = threading.Thread(target=monitor)
@@ -511,42 +534,53 @@ class NewsDriverCoordinator:
         thread.start()
         
     def start_scheduler(self):
-        """Start the workflow scheduler"""
-        def schedule_loop():
+        """Start scheduled workflow execution"""
+        def run_scheduled_jobs():
             while True:
                 schedule.run_pending()
                 time.sleep(60)  # Check every minute
                 
-        # Schedule pre-market scans
+        # Schedule pre-market aggressive scanning
         if self.workflow_config['pre_market']['enabled']:
             schedule.every().day.at(
                 self.workflow_config['pre_market']['start_time']
             ).do(lambda: self.start_new_cycle('aggressive'))
             
-        # Schedule market hours scans
+        # Schedule regular market hours scanning
         if self.workflow_config['market_hours']['enabled']:
-            schedule.every().day.at(
-                self.workflow_config['market_hours']['start_time']
-            ).do(lambda: self.start_new_cycle('normal'))
+            interval = self.workflow_config['market_hours']['interval_minutes']
+            schedule.every(interval).minutes.do(
+                lambda: self.start_new_cycle('normal')
+            ).tag('market_hours')
             
-        thread = threading.Thread(target=schedule_loop)
+        thread = threading.Thread(target=run_scheduled_jobs)
         thread.daemon = True
         thread.start()
         
+    def get_market_state(self) -> str:
+        """Determine current market state"""
+        now = datetime.now()
+        hour = now.hour
+        
+        if 4 <= hour < 9.5:
+            return 'pre_market'
+        elif 9.5 <= hour < 16:
+            return 'market_hours'
+        elif 16 <= hour < 20:
+            return 'after_hours'
+        else:
+            return 'closed'
+            
     def run(self):
         """Start the coordination service"""
         self.logger.info("Starting Coordination Service",
+                        version="2.1.0",
                         port=self.port,
                         environment=os.getenv('ENVIRONMENT', 'development'))
         
-        # Use host='0.0.0.0' for Docker
-        self.app.run(
-            host='0.0.0.0',
-            port=self.port,
-            debug=False
-        )
+        self.app.run(host='0.0.0.0', port=self.port, debug=False)
 
 
-if __name__ == '__main__':
-    coordinator = NewsDriverCoordinator()
-    coordinator.run()
+if __name__ == "__main__":
+    service = CoordinationService()
+    service.run()
