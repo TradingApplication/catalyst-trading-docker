@@ -333,7 +333,7 @@ class NewsDriverCoordinator:
             
             # Step 1: Collect News
             log_workflow_step(cycle_id, 'news_collection', 'started')
-            news_result = self.execute_step('news', '/collect', {
+            news_result = self.execute_step('news', '/collect_news', {
                 'mode': mode,
                 'cycle_id': cycle_id
             })
