@@ -23,8 +23,6 @@ psql "$DATABASE_URL" < create_scan_market_data.sql
 # Building 
 # ===============================================
 
-#Clear Docker Build caches
-docker builder prune -a
 
 # Remove all Docker cache, images, and build cache
 docker system prune -a --volumes -f
@@ -33,14 +31,12 @@ docker system prune -a --volumes -f
 docker builder prune -a -f
 
 # Full rebuild from scratch - build with no cache
-# ------------------------------------------------
 docker-compose build --no-cache --pull
-
 
 # Build the coordination service
 docker-compose build coordination-service
 
-# Build the coordination service
+# Build the pattern-service technical-servic
 docker-compose build pattern-service technical-service
 
 # ===============================================
@@ -55,6 +51,13 @@ docker-compose up -d scanner-service pattern-service technical-service
 
 # Stop all containers
 docker-compose down
+
+# =====================================================
+# 1. Stop and remove the coordination-service container
+# =====================================================
+
+docker-compose stop coordination-service
+docker-compose rm -f coordination-service
 
 # ===============================================
 # Testing
