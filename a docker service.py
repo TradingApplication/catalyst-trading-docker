@@ -1,0 +1,466 @@
+version: '3.8'
+
+services:
+  # =============================================================================
+  # DATABASE SERVICES
+  # =============================================================================
+  
+  postgres:
+    image: postgres:14
+    container_name: catalyst-postgres
+    environment:
+      - POSTGRES_DB=${DB_NAME:-catalyst_trading}
+      - POSTGRES_USER=${DB_USER:-catalyst_user}
+      - POSTGRES_PASSWORD=${DB_PASSWORD:-catalyst_password}
+      - POSTGRES_HOST_AUTH_METHOD=md5
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./sql/init.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "5432:5432"
+    networks:
+      - catalyst-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-catalyst_user} -d ${DB_NAME:-catalyst_trading}"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  redis:
+    image: redis:7-alpine
+    container_name: catalyst-redis
+    command: redis-server --requirepass ${REDIS_PASSWORD:-catalyst_redis_pass}
+    environment:
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-catalyst_redis_pass}
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    networks:
+      - catalyst-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "--no-auth-warning", "-a", "${REDIS_PASSWORD:-catalyst_redis_pass}", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # =============================================================================
+  # CORE TRADING SERVICES
+  # =============================================================================
+
+  coordination-service:
+    build:
+      context: .
+      dockerfile: Dockerfile.coordination
+    container_name: catalyst-coordination
+    environment:
+      # Service Configuration
+      - ENVIRONMENT=${ENVIRONMENT:-development}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - PORT=5000
+      
+      # CRITICAL FIX: Enable Trading
+      - TRADING_ENABLED=true
+      
+      # Database Configuration
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=${DB_NAME:-catalyst_trading}
+      - DB_USER=${DB_USER:-catalyst_user}
+      - DB_PASSWORD=${DB_PASSWORD:-catalyst_password}
+      
+      # Redis Configuration
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-catalyst_redis_pass}
+      
+      # Service URLs
+      - NEWS_SERVICE_URL=http://news-service:5008
+      - SCANNER_SERVICE_URL=http://scanner-service:5001
+      - PATTERN_SERVICE_URL=http://pattern-service:5002
+      - TECHNICAL_SERVICE_URL=http://technical-service:5003
+      - TRADING_SERVICE_URL=http://trading-service:5005
+      - REPORTING_SERVICE_URL=http://reporting-service:5009
+      
+      # Trading Schedule
+      - PREMARKET_ENABLED=true
+      - PREMARKET_START=04:00
+      - PREMARKET_END=09:30
+      - PREMARKET_INTERVAL=5
+      - MARKET_HOURS_ENABLED=true
+      - MARKET_START=09:30
+      - MARKET_END=16:00
+      - MARKET_INTERVAL=30
+      - AFTER_HOURS_ENABLED=true
+      - AFTER_HOURS_START=16:00
+      - AFTER_HOURS_END=20:00
+      - AFTER_HOURS_INTERVAL=60
+      
+    ports:
+      - "5000:5000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - catalyst-network
+    volumes:
+      - ./logs:/app/logs
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  trading-service:
+    build:
+      context: .
+      dockerfile: Dockerfile.trading
+    container_name: catalyst-trading
+    environment:
+      # Service Configuration
+      - ENVIRONMENT=${ENVIRONMENT:-development}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - PORT=5005
+      
+      # CRITICAL FIX: Enable Trading
+      - TRADING_ENABLED=true
+      
+      # Database Configuration
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=${DB_NAME:-catalyst_trading}
+      - DB_USER=${DB_USER:-catalyst_user}
+      - DB_PASSWORD=${DB_PASSWORD:-catalyst_password}
+      
+      # Redis Configuration
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-catalyst_redis_pass}
+      
+      # CRITICAL FIX: Alpaca Paper Trading Configuration
+      - ALPACA_API_KEY=${ALPACA_API_KEY}
+      - ALPACA_SECRET_KEY=${ALPACA_SECRET_KEY}
+      - ALPACA_BASE_URL=${ALPACA_BASE_URL:-https://paper-api.alpaca.markets}
+      - ALPACA_DATA_URL=${ALPACA_DATA_URL:-https://data.alpaca.markets}
+      
+      # Trading Configuration
+      - MAX_POSITION_SIZE=${MAX_POSITION_SIZE:-1000}
+      - MAX_DAILY_TRADES=${MAX_DAILY_TRADES:-10}
+      - DEFAULT_STOP_LOSS_PCT=${DEFAULT_STOP_LOSS_PCT:-2.0}
+      - DEFAULT_TAKE_PROFIT_PCT=${DEFAULT_TAKE_PROFIT_PCT:-4.0}
+      - MIN_TRADING_CONFIDENCE=${MIN_TRADING_CONFIDENCE:-60.0}
+      
+      # Service URLs
+      - COORDINATION_URL=http://coordination-service:5000
+      
+    ports:
+      - "5005:5005"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - catalyst-network
+    volumes:
+      - ./logs:/app/logs
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5005/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  technical-service:
+    build:
+      context: .
+      dockerfile: Dockerfile.technical
+    container_name: catalyst-technical
+    environment:
+      # Service Configuration
+      - ENVIRONMENT=${ENVIRONMENT:-development}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - PORT=5003
+      
+      # Database Configuration
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=${DB_NAME:-catalyst_trading}
+      - DB_USER=${DB_USER:-catalyst_user}
+      - DB_PASSWORD=${DB_PASSWORD:-catalyst_password}
+      
+      # Redis Configuration
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-catalyst_redis_pass}
+      
+      # Technical Analysis Configuration
+      - RSI_PERIOD=${RSI_PERIOD:-14}
+      - MACD_FAST=${MACD_FAST:-12}
+      - MACD_SLOW=${MACD_SLOW:-26}
+      - MACD_SIGNAL=${MACD_SIGNAL:-9}
+      - BB_PERIOD=${BB_PERIOD:-20}
+      - BB_STD=${BB_STD:-2.0}
+      - SMA_SHORT=${SMA_SHORT:-20}
+      - SMA_LONG=${SMA_LONG:-50}
+      - EMA_SHORT=${EMA_SHORT:-9}
+      - EMA_LONG=${EMA_LONG:-21}
+      - ATR_PERIOD=${ATR_PERIOD:-14}
+      - ADX_PERIOD=${ADX_PERIOD:-14}
+      - STOCH_PERIOD=${STOCH_PERIOD:-14}
+      
+      # Signal Configuration
+      - RSI_OVERSOLD=${RSI_OVERSOLD:-30}
+      - RSI_OVERBOUGHT=${RSI_OVERBOUGHT:-70}
+      - MACD_THRESHOLD=${MACD_THRESHOLD:-0}
+      - ADX_TREND_STRENGTH=${ADX_TREND_STRENGTH:-25}
+      - MIN_SIGNAL_CONFIDENCE=${MIN_SIGNAL_CONFIDENCE:-60}
+      - TECHNICAL_LOOKBACK_PERIODS=${TECHNICAL_LOOKBACK_PERIODS:-100}
+      
+      # Risk Parameters
+      - STOP_LOSS_ATR=${STOP_LOSS_ATR:-2.0}
+      - TAKE_PROFIT_ATR=${TAKE_PROFIT_ATR:-3.0}
+      
+      # Service URLs
+      - COORDINATION_URL=http://coordination-service:5000
+      - PATTERN_SERVICE_URL=http://pattern-service:5002
+      
+      # Cache Configuration
+      - TECHNICAL_CACHE_TTL=${TECHNICAL_CACHE_TTL:-300}
+      
+    ports:
+      - "5003:5003"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - catalyst-network
+    volumes:
+      - ./logs:/app/logs
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5003/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # =============================================================================
+  # ANALYSIS SERVICES
+  # =============================================================================
+
+  scanner-service:
+    build:
+      context: .
+      dockerfile: Dockerfile.scanner
+    container_name: catalyst-scanner
+    environment:
+      # Service Configuration
+      - ENVIRONMENT=${ENVIRONMENT:-development}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - PORT=5001
+      
+      # Database Configuration
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=${DB_NAME:-catalyst_trading}
+      - DB_USER=${DB_USER:-catalyst_user}
+      - DB_PASSWORD=${DB_PASSWORD:-catalyst_password}
+      
+      # Redis Configuration
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-catalyst_redis_pass}
+      
+      # Service URLs
+      - COORDINATION_URL=http://coordination-service:5000
+      
+    ports:
+      - "5001:5001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - catalyst-network
+    volumes:
+      - ./logs:/app/logs
+    restart: unless-stopped
+
+  pattern-service:
+    build:
+      context: .
+      dockerfile: Dockerfile.pattern
+    container_name: catalyst-pattern
+    environment:
+      # Service Configuration
+      - ENVIRONMENT=${ENVIRONMENT:-development}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - PORT=5002
+      
+      # Database Configuration
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=${DB_NAME:-catalyst_trading}
+      - DB_USER=${DB_USER:-catalyst_user}
+      - DB_PASSWORD=${DB_PASSWORD:-catalyst_password}
+      
+      # Redis Configuration
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-catalyst_redis_pass}
+      
+      # Service URLs
+      - COORDINATION_URL=http://coordination-service:5000
+      
+    ports:
+      - "5002:5002"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - catalyst-network
+    volumes:
+      - ./logs:/app/logs
+    restart: unless-stopped
+
+  news-service:
+    build:
+      context: .
+      dockerfile: Dockerfile.news
+    container_name: catalyst-news
+    environment:
+      # Service Configuration
+      - ENVIRONMENT=${ENVIRONMENT:-development}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - PORT=5008
+      
+      # Database Configuration
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=${DB_NAME:-catalyst_trading}
+      - DB_USER=${DB_USER:-catalyst_user}
+      - DB_PASSWORD=${DB_PASSWORD:-catalyst_password}
+      
+      # Redis Configuration
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-catalyst_redis_pass}
+      
+      # News API Configuration
+      - NEWS_API_KEY=${NEWS_API_KEY}
+      - ALPHA_VANTAGE_API_KEY=${ALPHA_VANTAGE_API_KEY}
+      - FINNHUB_API_KEY=${FINNHUB_API_KEY}
+      
+      # Service URLs
+      - COORDINATION_URL=http://coordination-service:5000
+      
+    ports:
+      - "5008:5008"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - catalyst-network
+    volumes:
+      - ./logs:/app/logs
+    restart: unless-stopped
+
+  # =============================================================================
+  # REPORTING AND DASHBOARD SERVICES
+  # =============================================================================
+
+  reporting-service:
+    build:
+      context: .
+      dockerfile: Dockerfile.reporting
+    container_name: catalyst-reporting
+    environment:
+      # Service Configuration
+      - ENVIRONMENT=${ENVIRONMENT:-development}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - PORT=5009
+      
+      # Database Configuration
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=${DB_NAME:-catalyst_trading}
+      - DB_USER=${DB_USER:-catalyst_user}
+      - DB_PASSWORD=${DB_PASSWORD:-catalyst_password}
+      
+      # Redis Configuration
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-catalyst_redis_pass}
+      
+    ports:
+      - "5009:5009"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - catalyst-network
+    volumes:
+      - ./logs:/app/logs
+    restart: unless-stopped
+
+  web-dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile.dashboard
+    container_name: catalyst-dashboard
+    environment:
+      # Service Configuration
+      - ENVIRONMENT=${ENVIRONMENT:-development}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - PORT=5010
+      
+      # Service URLs for API calls
+      - COORDINATION_URL=http://coordination-service:5000
+      - TRADING_URL=http://trading-service:5005
+      - TECHNICAL_URL=http://technical-service:5003
+      - PATTERN_URL=http://pattern-service:5002
+      - SCANNER_URL=http://scanner-service:5001
+      - NEWS_URL=http://news-service:5008
+      - REPORTING_URL=http://reporting-service:5009
+      
+    ports:
+      - "5010:5010"
+    depends_on:
+      - coordination-service
+      - trading-service
+      - technical-service
+    networks:
+      - catalyst-network
+    volumes:
+      - ./logs:/app/logs
+    restart: unless-stopped
+
+# =============================================================================
+# NETWORK AND VOLUME CONFIGURATION
+# =============================================================================
+
+networks:
+  catalyst-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
