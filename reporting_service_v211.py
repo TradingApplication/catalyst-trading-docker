@@ -2,14 +2,11 @@
 """
 Name of Application: Catalyst Trading System
 Name of file: reporting_service.py
-Version: 2.1.2
+Version: 2.1.1
 Last Updated: 2025-07-08
 Purpose: Analytics and reporting service for trading performance and system health
 
 REVISION HISTORY:
-v2.1.2 (2025-07-14) - Fixed endpoint calls
-- Table reference change FROM trades → FROM trade_records
-
 v2.1.1 (2025-07-08) - Fixed endpoint calls
 - Changed /service_status to /service_health in two places
 - Fixed _generate_system_health_report method
@@ -347,7 +344,7 @@ class ReportingService:
                         MIN(pnl) as largest_loss,
                         SUM(quantity) as total_volume,
                         SUM(commission) as total_commissions
-                    FROM trade_records 
+                    FROM trades 
                     WHERE DATE(executed_at) = %s
                 """, (target_date,))
                 
@@ -444,14 +441,14 @@ class ReportingService:
         
         with get_db_connection() as conn:
             with conn.cursor() as cur:
-                # Get all trade_records in period
+                # Get all trades in period
                 cur.execute("""
-                    SELECT * FROM trade_records 
+                    SELECT * FROM trades 
                     WHERE executed_at >= %s 
                     ORDER BY executed_at
                 """, (start_date,))
                 
-                trade_records = cur.fetchall()
+                trades = cur.fetchall()
                 
                 # Get current positions if requested
                 positions = []
@@ -463,7 +460,7 @@ class ReportingService:
                     positions = cur.fetchall()
         
         # Calculate performance metrics
-        if not trade_records:
+        if not trades:
             return {
                 'period_days': period_days,
                 'total_trades': 0,
@@ -474,11 +471,11 @@ class ReportingService:
             }
         
         # Calculate metrics
-        total_trades = len(trade_records)
-        winning_trades = len([t for t in trade_records if (t['pnl'] or 0) > 0])
-        losing_trades = len([t for t in trade_records if (t['pnl'] or 0) < 0])
+        total_trades = len(trades)
+        winning_trades = len([t for t in trades if (t['pnl'] or 0) > 0])
+        losing_trades = len([t for t in trades if (t['pnl'] or 0) < 0])
         
-        pnls = [float(t['pnl'] or 0) for t in trade_records]
+        pnls = [float(t['pnl'] or 0) for t in trades]
         wins = [p for p in pnls if p > 0]
         losses = [p for p in pnls if p < 0]
         
@@ -488,7 +485,7 @@ class ReportingService:
         average_loss = sum(losses) / len(losses) if losses else 0
         
         # Calculate Sharpe ratio (simplified)
-        daily_returns = self._calculate_daily_returns(trade_records)
+        daily_returns = self._calculate_daily_returns(trades)
         sharpe_ratio = self._calculate_sharpe_ratio(daily_returns)
         
         # Calculate max drawdown
@@ -512,8 +509,8 @@ class ReportingService:
             profit_factor=round(profit_factor, 2),
             sharpe_ratio=round(sharpe_ratio, 2),
             max_drawdown=round(max_drawdown, 2),
-            total_volume=sum([t['quantity'] or 0 for t in trade_records]),
-            total_commissions=sum([float(t['commission'] or 0) for t in trade_records])
+            total_volume=sum([t['quantity'] or 0 for t in trades]),
+            total_commissions=sum([float(t['commission'] or 0) for t in trades])
         )
         
         result = {
@@ -552,7 +549,7 @@ class ReportingService:
                     FROM pattern_analysis pa
                     LEFT JOIN trading_candidates tc ON pa.symbol = tc.symbol 
                         AND DATE(pa.created_at) = DATE(tc.created_at)
-                    LEFT JOIN trade_records t ON tc.symbol = t.symbol 
+                    LEFT JOIN trades t ON tc.symbol = t.symbol 
                         AND t.executed_at >= pa.created_at
                         AND t.executed_at <= pa.created_at + INTERVAL '24 hours'
                     WHERE pa.created_at >= %s
@@ -673,7 +670,7 @@ class ReportingService:
                 # Recent P&L for VaR calculation
                 cur.execute("""
                     SELECT pnl 
-                    FROM trade_records 
+                    FROM trades 
                     WHERE executed_at >= NOW() - INTERVAL '30 days'
                     ORDER BY executed_at
                 """)
@@ -729,7 +726,7 @@ class ReportingService:
                         COUNT(*) as trade_count,
                         SUM(pnl) as total_pnl,
                         AVG(pnl) as avg_pnl
-                    FROM trade_records 
+                    FROM trades 
                     WHERE executed_at >= NOW() - INTERVAL '30 days'
                     GROUP BY symbol
                     ORDER BY total_pnl DESC
@@ -825,14 +822,14 @@ class ReportingService:
         }
 
     # Helper methods
-    def _calculate_daily_returns(self, trade_records: List) -> List[float]:
-        """Calculate daily returns from trade_records"""
-        if not trade_records:
+    def _calculate_daily_returns(self, trades: List) -> List[float]:
+        """Calculate daily returns from trades"""
+        if not trades:
             return []
         
-        # Group trade_records by date and sum P&L
+        # Group trades by date and sum P&L
         daily_pnl = {}
-        for trade in trade_records:
+        for trade in trades:
             date = trade['executed_at'].date() if hasattr(trade['executed_at'], 'date') else trade['executed_at']
             if isinstance(date, str):
                 date = datetime.strptime(date.split()[0], '%Y-%m-%d').date()
