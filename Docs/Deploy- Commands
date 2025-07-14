@@ -1,0 +1,74 @@
+
+
+
+
+# ===============================================
+# Deploy
+# ===============================================
+
+scp -i C:\Users\craig\.ssh\craigjcolley_do .env root@68.183.177.11:/opt/catalyst-trading-docker/
+# (pass phrase in Keeper)
+
+
+# ===============================================
+# SQL Commands to update
+# ===============================================
+
+#below example runs the sql command create_scan_market_data.sql
+source .env 
+psql "$DATABASE_URL" < create_scan_market_data.sql
+
+
+# ===============================================
+# Building 
+# ===============================================
+
+
+# Remove all Docker cache, images, and build cache
+docker system prune -a --volumes -f
+
+# Clear builder cache specifically
+docker builder prune -a -f
+
+# Full rebuild from scratch - build with no cache
+docker-compose build --no-cache --pull
+
+# Build the coordination service
+docker-compose build coordination-service
+
+# Build the pattern-service technical-servic
+docker-compose build pattern-service technical-service
+
+# ===============================================
+# Starting 
+# ===============================================
+
+# Staring System
+docker-compose up -d
+
+# Staring some of System Services
+docker-compose up -d scanner-service pattern-service technical-service
+
+# Stop all containers
+docker-compose down
+
+# =====================================================
+# 1. Stop and remove the coordination-service container
+# =====================================================
+
+docker-compose stop coordination-service
+docker-compose rm -f coordination-service
+
+# ===============================================
+# Testing
+# ===============================================
+
+# Check the logs for a service that's restarting
+docker-compose logs news-service | tail -50
+
+# Or check coordination service (it's usually a good indicator)
+docker-compose logs coordination-service | tail -50
+
+# Check Redis and Postgres specifically
+docker-compose logs redis | tail -20
+docker-compose logs postgres | tail -20

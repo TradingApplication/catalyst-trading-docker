@@ -1,0 +1,55 @@
+#To access Droplet via VSCode Terminal
+# SSH, or Secure Shell, is a network protocol that provides a secure connection to remote servers
+
+ssh -i ~/.ssh/digitalocean_catalyst root@68.183.177.11
+#NB You will need passphrase#
+
+# Once you have SSH secure connection you can use SCP
+# Secure copy protocol (SCP) transferS  files between a local host and a remote host 
+
+#To setup git to synchronize with Github
+cd /opt/catalyst-trading-system
+git init
+git remote add origin https://github.com/TradingApplication/catalyst-trading-docker.git
+
+
+#get changes from Github
+git pull origin main
+
+# To add a file to a git update e.g. git add FILENAME
+git add Dockerfile.scanner
+git commit -m "Update Dockerfile.scanner to v1.3.0"
+
+git push origin main
+
+# Transfer .ENV using SSH from VSCode Terminal
+scp -i ~/.ssh/digitalocean_catalyst /home/codespace/catalyst-trading-system/.env root@68.183.177.11:/opt/catalyst-trading-docker/.env 
+
+# From your PC (Windows), run:
+scp -i C:\Users\craig\.ssh\craigjcolley_do root@68.183.177.11:/opt/catalyst-trading-docker/.env C:\Users\craig\Desktop\.env
+
+
+#connect to Github
+git clone https://github.com/TradingApplication/catalyst-trading-docker.git /opt/catalyst-trading-systemp
+
+Complete Nuclear Sync Process:
+# 1. First, commit and push ALL your local changes
+git add -A
+git commit -m "Fix all issues - urllib3, dashboard werkzeug, dockerfiles"
+git push origin main
+
+# 2. On the droplet, pull everything fresh
+cd /opt/catalyst-trading-docker
+git fetch --all
+git reset --hard origin/main
+git pull origin main
+
+# 3. Stop and remove everything
+docker-compose -f docker-compose.yml down -v
+docker system prune -a -f --volumes
+
+# 4. Rebuild EVERYTHING from scratch
+docker-compose -f docker-compose.yml build --no-cache --pull
+
+# 5. Start fresh
+docker-compose -f docker-compose.yml up -d

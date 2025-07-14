@@ -1,0 +1,252 @@
+version: '3.8'
+
+# Memory-optimized configuration for 4GB droplet
+services:
+  # Redis Cache
+  redis:
+    image: redis:7-alpine
+    container_name: catalyst-redis
+    ports:
+      - "6379:6379"
+    command: redis-server --requirepass ${REDIS_PASSWORD}
+    volumes:
+      - redis_data:/data
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+        reservations:
+          memory: 64M
+    restart: unless-stopped
+    networks:
+      - catalyst-network
+
+  # Coordination Service
+  coordination-service:
+    build:
+      context: .
+      dockerfile: Dockerfile.coordination
+    container_name: catalyst-coordination
+    ports:
+      - "5000:5000"
+    env_file:
+      - .env
+    depends_on:
+      - redis
+    volumes:
+      - ./logs:/app/logs
+      - ./data:/app/data
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+        reservations:
+          memory: 128M
+    restart: unless-stopped
+    networks:
+      - catalyst-network
+
+  # News Service
+  news-service:
+    build:
+      context: .
+      dockerfile: Dockerfile.news
+    container_name: catalyst-news
+    ports:
+      - "5008:5008"
+    env_file:
+      - .env
+    depends_on:
+      - redis
+      - coordination-service
+    volumes:
+      - ./logs:/app/logs
+      - ./data:/app/data
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+        reservations:
+          memory: 128M
+    restart: unless-stopped
+    networks:
+      - catalyst-network
+
+  # Scanner Service
+  scanner-service:
+    build:
+      context: .
+      dockerfile: Dockerfile.scanner
+    container_name: catalyst-scanner
+    ports:
+      - "5001:5001"
+    env_file:
+      - .env
+    environment:
+      - PYTHONOPTIMIZE=1
+      - MALLOC_TRIM_THRESHOLD_=100000
+    depends_on:
+      - redis
+      - news-service
+      - coordination-service
+    volumes:
+      - ./logs:/app/logs
+      - ./data:/app/data
+    deploy:
+      resources:
+        limits:
+          memory: 384M
+        reservations:
+          memory: 256M
+    restart: unless-stopped
+    networks:
+      - catalyst-network
+
+  # Pattern Service
+  pattern-service:
+    build:
+      context: .
+      dockerfile: Dockerfile.pattern
+    container_name: catalyst-pattern
+    ports:
+      - "5002:5002"
+    env_file:
+      - .env
+    environment:
+      - PYTHONOPTIMIZE=1
+      - MALLOC_TRIM_THRESHOLD_=100000
+    depends_on:
+      - redis
+      - coordination-service
+    volumes:
+      - ./logs:/app/logs
+      - ./data:/app/data
+      - ./models:/app/models
+    deploy:
+      resources:
+        limits:
+          memory: 384M
+        reservations:
+          memory: 256M
+    restart: unless-stopped
+    networks:
+      - catalyst-network
+
+  # Technical Service
+  technical-service:
+    build:
+      context: .
+      dockerfile: Dockerfile.technical
+    container_name: catalyst-technical
+    ports:
+      - "5003:5003"
+    env_file:
+      - .env
+    environment:
+      - PYTHONOPTIMIZE=1
+      - MALLOC_TRIM_THRESHOLD_=100000
+    depends_on:
+      - redis
+      - coordination-service
+      - pattern-service
+    volumes:
+      - ./logs:/app/logs
+      - ./data:/app/data
+      - ./models:/app/models
+    deploy:
+      resources:
+        limits:
+          memory: 384M
+        reservations:
+          memory: 256M
+    restart: unless-stopped
+    networks:
+      - catalyst-network
+
+  # Trading Service
+  trading-service:
+    build:
+      context: .
+      dockerfile: Dockerfile.trading
+    container_name: catalyst-trading
+    ports:
+      - "5005:5005"
+    env_file:
+      - .env
+    depends_on:
+      - redis
+      - coordination-service
+      - technical-service
+    volumes:
+      - ./logs:/app/logs
+      - ./data:/app/data
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+        reservations:
+          memory: 128M
+    restart: unless-stopped
+    networks:
+      - catalyst-network
+
+  # Reporting Service
+  reporting-service:
+    build:
+      context: .
+      dockerfile: Dockerfile.reporting
+    container_name: catalyst-reporting
+    ports:
+      - "5009:5009"
+    env_file:
+      - .env
+    depends_on:
+      - redis
+      - coordination-service
+    volumes:
+      - ./logs:/app/logs
+      - ./reports:/app/reports
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+        reservations:
+          memory: 128M
+    restart: unless-stopped
+    networks:
+      - catalyst-network
+
+  # Web Dashboard
+  web-dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile.dashboard
+    container_name: catalyst-dashboard
+    ports:
+      - "5010:5010"
+      - "80:80"
+    env_file:
+      - .env
+    depends_on:
+      - redis
+      - coordination-service
+    volumes:
+      - ./logs:/app/logs
+      - ./data:/app/data
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+        reservations:
+          memory: 128M
+    restart: unless-stopped
+    networks:
+      - catalyst-network
+
+networks:
+  catalyst-network:
+    driver: bridge
+
+volumes:
+  redis_data:
+    driver: local

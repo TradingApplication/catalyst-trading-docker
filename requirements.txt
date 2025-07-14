@@ -1,0 +1,57 @@
+# Catalyst Trading System - Complete Requirements
+# Version: 2.4.0 - Flexible dependency resolution
+
+# Core Web Framework
+flask==3.0.0
+flask-cors==4.0.0
+flask-socketio==5.3.5
+
+# Database
+psycopg2-binary==2.9.9
+redis==5.0.1
+
+# API Clients
+requests==2.31.0
+alpaca-trade-api==3.0.2
+websocket-client==1.6.4
+
+# Data Processing
+pandas==2.1.4
+numpy==1.24.3
+scipy==1.11.4
+scikit-learn==1.3.2
+
+# Technical Analysis
+yfinance==0.2.33
+# Note: TA-Lib requires special installation in Dockerfile
+# ta-lib==0.4.28
+
+# Scheduling
+APScheduler==3.10.4
+schedule==1.2.0
+
+# Web Scraping
+beautifulsoup4==4.12.2
+lxml==4.9.3
+
+# News Processing
+feedparser==6.0.11
+
+# Logging
+structlog==24.1.0
+
+# Monitoring
+prometheus-client==0.19.0
+
+# Visualization
+plotly==5.18.0
+
+# Utilities
+python-dotenv==1.0.0
+python-dateutil==2.8.2
+pytz==2023.3
+loguru==0.7.2
+
+# Let pip resolve these automatically
+# urllib3, certifi, charset-normalizer, idna will be installed 
+# as dependencies of other packages with compatible versions

@@ -1,0 +1,7 @@
+# =================================
+# Trade initiatin
+# =================================
+
+curl -X POST http://localhost:5000/start_trading_cycle \
+  -H "Content-Type: application/json" \
+  -d '{"mode": "normal"}'
