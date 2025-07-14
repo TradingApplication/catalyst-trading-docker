@@ -14,7 +14,7 @@ git remote add origin https://github.com/TradingApplication/catalyst-trading-doc
 
 
 #get changes from Github
-git pull origin main
+    git pull origin main
 
 # To add a file to a git update e.g. git add FILENAME
 git add Dockerfile.scanner
