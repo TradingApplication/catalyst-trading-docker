@@ -23,7 +23,8 @@ git commit -m "Update Dockerfile.scanner to v1.3.0"
 git push origin main
 
 # Transfer .ENV using SSH from VSCode Terminal
-scp -i ~/.ssh/digitalocean_catalyst /home/codespace/catalyst-trading-system/.env root@68.183.177.11:/opt/catalyst-trading-docker/.env 
+scp -i ~/.ssh/digitalocean_catalyst /workspaces/catalyst-trading-docker/.env root@68.183.177.11:/opt/catalyst-trading-docker/.env
+
 
 # From your PC (Windows), run:
 scp -i C:\Users\craig\.ssh\craigjcolley_do root@68.183.177.11:/opt/catalyst-trading-docker/.env C:\Users\craig\Desktop\.env
