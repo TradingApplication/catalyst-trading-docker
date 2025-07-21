@@ -234,6 +234,8 @@ services:
       context: .
       dockerfile: Dockerfile.scanner
     container_name: catalyst-scanner
+    env_file:
+      - .env
     environment:
       # Service Configuration
       - ENVIRONMENT=${ENVIRONMENT:-development}
