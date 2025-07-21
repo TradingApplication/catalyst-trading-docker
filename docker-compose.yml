@@ -375,6 +375,7 @@ services:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - REDIS_PASSWORD=${REDIS_PASSWORD:-catalyst_redis_pass}
+      - REDIS_URL=redis://:RedisCatalyst2025!SecureCache@redis:6379/0
       
     ports:
       - "5009:5009"

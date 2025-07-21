@@ -19,8 +19,6 @@ git remote add origin https://github.com/TradingApplication/catalyst-trading-doc
 # To add a file to a git update e.g. git add FILENAME
 git add Dockerfile.scanner
 git commit -m "Update Dockerfile.scanner to v1.3.0"
-
-
 git push origin main
 
 # Transfer .ENV using SSH from VSCode Terminal
