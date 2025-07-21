@@ -2,18 +2,11 @@
 """
 Name of Application: Catalyst Trading System
 Name of file: scanner_service.py
-Version: 3.2.0
-Last Updated: 2025-07-21
-Purpose: Enhanced scanner with comprehensive market data collection using Alpaca
+Version: 3.1.1
+Last Updated: 2025-07-10
+Purpose: Enhanced scanner with comprehensive market data collection
 
 REVISION HISTORY:
-v3.2.0 (2025-07-21) - Migrated from Yahoo Finance to Alpaca API
-- Replaced yfinance with alpaca_trade_api
-- Updated _get_enriched_symbol_data to use Alpaca market data
-- Added Alpaca API initialization with environment variables
-- Improved error handling for API rate limits
-- Added bid/ask spread data from Alpaca quotes
-
 v3.1.1 (2025-07-10) - Fixed import and service name issues
 - Fixed import of insert_trading_candidates
 - Added wrapper function for batch inserts
@@ -58,7 +51,7 @@ from flask import Flask, jsonify, request
 import requests
 import pandas as pd
 import numpy as np
-from alpaca_trade_api import REST
+import yfinance as yf
 import redis
 import psycopg2
 from psycopg2.extras import RealDictCursor, execute_batch
@@ -131,14 +124,6 @@ class EnhancedDynamicSecurityScanner:
         # Flask app
         self.app = Flask(__name__)
         
-        # Initialize Alpaca API client
-        self.alpaca_api = REST(
-            os.getenv('ALPACA_API_KEY'),
-            os.getenv('ALPACA_SECRET_KEY'),
-            os.getenv('ALPACA_BASE_URL', 'https://paper-api.alpaca.markets'),
-            api_version='v2'
-        )
-        
         # Database connection pool
         self.db_pool = ThreadedConnectionPool(
             minconn=2,
@@ -190,10 +175,9 @@ class EnhancedDynamicSecurityScanner:
         # Register with coordination
         self._register_with_coordination()
         
-        self.logger.info("Enhanced Dynamic Security Scanner v3.2.0 initialized",
+        self.logger.info("Enhanced Dynamic Security Scanner v3.1.1 initialized",
                         environment=os.getenv('ENVIRONMENT', 'development'),
-                        tracking_size=self.scan_params['top_tracking_size'],
-                        data_source="Alpaca Markets")
+                        tracking_size=self.scan_params['top_tracking_size'])
         
     def setup_environment(self):
         """Setup environment variables and paths"""
@@ -220,9 +204,8 @@ class EnhancedDynamicSecurityScanner:
             return jsonify({
                 "status": "healthy" if db_health['postgresql']['status'] == 'healthy' else "degraded",
                 "service": "scanner_service",  # Changed to match coordination expectations
-                "version": "3.2.0",
+                "version": "3.1.1",
                 "mode": "top-100-tracking",
-                "data_source": "Alpaca Markets",
                 "tracking_count": len(self.tracking_state),
                 "database": db_health['postgresql']['status'],
                 "redis": db_health['redis']['status'],  # Fixed double comma
@@ -355,56 +338,27 @@ class EnhancedDynamicSecurityScanner:
         return list(dict.fromkeys(movers))
         
     def _get_enriched_symbol_data(self, symbol: str) -> Optional[Dict]:
-        """Get enriched symbol data with technical indicators using Alpaca"""
+        """Get enriched symbol data with technical indicators"""
         try:
-            # Get latest quote and trade data
-            latest_quote = self.alpaca_api.get_latest_quote(symbol)
-            latest_trade = self.alpaca_api.get_latest_trade(symbol)
+            ticker = yf.Ticker(symbol)
             
-            # Get historical bars for technical indicators (1 month of daily data)
-            end = datetime.now()
-            start = end - timedelta(days=30)
+            # Get basic info
+            info = ticker.info
             
-            bars_response = self.alpaca_api.get_bars(
-                symbol,
-                '1Day',
-                start=start.isoformat(),
-                end=end.isoformat(),
-                limit=30
-            )
-            
-            # Convert bars to DataFrame for easier manipulation
-            bars_data = []
-            for bar in bars_response:
-                bars_data.append({
-                    'timestamp': bar.t,
-                    'open': bar.o,
-                    'high': bar.h,
-                    'low': bar.l,
-                    'close': bar.c,
-                    'volume': bar.v
-                })
-            
-            if not bars_data:
+            # Get price history for technical indicators
+            hist = ticker.history(period="1mo", interval="1d")
+            if hist.empty:
                 return None
                 
-            bars = pd.DataFrame(bars_data)
-            bars.set_index('timestamp', inplace=True)
-            
             # Get current data
-            current_price = float(latest_trade.price)
-            current_volume = int(bars['volume'].iloc[-1]) if len(bars) > 0 else 0
-            
-            # Get snapshot for additional data (includes daily bar and previous close)
-            snapshot = self.alpaca_api.get_snapshot(symbol)
-            daily_bar = snapshot.daily_bar
-            prev_daily_bar = snapshot.prev_daily_bar
+            current_price = info.get('currentPrice', info.get('regularMarketPrice', hist['Close'].iloc[-1]))
+            current_volume = info.get('volume', info.get('regularMarketVolume', hist['Volume'].iloc[-1]))
             
             # Calculate technical indicators
-            close_prices = bars['close'].values
-            high_prices = bars['high'].values
-            low_prices = bars['low'].values
-            volumes = bars['volume'].values
+            close_prices = hist['Close'].values
+            high_prices = hist['High'].values
+            low_prices = hist['Low'].values
+            volumes = hist['Volume'].values
             
             # Calculate indicators
             technical_data = self._calculate_technical_indicators(
@@ -415,16 +369,16 @@ class EnhancedDynamicSecurityScanner:
             data = {
                 'symbol': symbol,
                 'scan_timestamp': datetime.now(),
-                'price': current_price,
-                'open_price': float(daily_bar.o) if daily_bar else float(bars['open'].iloc[-1]),
-                'high_price': float(daily_bar.h) if daily_bar else float(bars['high'].iloc[-1]),
-                'low_price': float(daily_bar.l) if daily_bar else float(bars['low'].iloc[-1]),
-                'previous_close': float(prev_daily_bar.c) if prev_daily_bar else float(bars['close'].iloc[-2]) if len(bars) > 1 else current_price,
-                'volume': current_volume,
-                'average_volume': int(volumes[-20:].mean()) if len(volumes) >= 20 else current_volume,
-                'market_cap': 0,  # Alpaca doesn't provide market cap directly
-                'sector': 'Unknown',  # Would need separate data source
-                'industry': 'Unknown',  # Would need separate data source
+                'price': float(current_price),
+                'open_price': float(hist['Open'].iloc[-1]),
+                'high_price': float(hist['High'].iloc[-1]),
+                'low_price': float(hist['Low'].iloc[-1]),
+                'previous_close': float(hist['Close'].iloc[-2]) if len(hist) > 1 else float(current_price),
+                'volume': int(current_volume),
+                'average_volume': int(volumes[-20:].mean()) if len(volumes) >= 20 else int(current_volume),
+                'market_cap': info.get('marketCap', 0),
+                'sector': info.get('sector', 'Unknown'),
+                'industry': info.get('industry', 'Unknown'),
                 'news_count': 0,
                 'has_news': False,
                 **technical_data
@@ -437,12 +391,6 @@ class EnhancedDynamicSecurityScanner:
             data['relative_volume'] = (data['volume'] / data['average_volume']) if data['average_volume'] > 0 else 1
             data['dollar_volume'] = data['price'] * data['volume']
             data['day_range_pct'] = ((data['high_price'] - data['low_price']) / data['low_price'] * 100) if data['low_price'] > 0 else 0
-            
-            # Additional Alpaca-specific metrics
-            data['bid_price'] = float(latest_quote.bid_price) if latest_quote else data['price']
-            data['ask_price'] = float(latest_quote.ask_price) if latest_quote else data['price']
-            data['spread'] = data['ask_price'] - data['bid_price']
-            data['spread_pct'] = (data['spread'] / data['price'] * 100) if data['price'] > 0 else 0
             
             # Get news data
             try:
@@ -575,13 +523,6 @@ class EnhancedDynamicSecurityScanner:
             score *= 1.1
         elif market_cap < 100000000:  # <100M
             score *= 0.8
-        
-        # Spread penalty for Alpaca data
-        spread_pct = data.get('spread_pct', 0)
-        if spread_pct > 1:
-            score *= 0.9
-        elif spread_pct > 0.5:
-            score *= 0.95
             
         return round(score, 2)
         
@@ -636,10 +577,6 @@ class EnhancedDynamicSecurityScanner:
                         market_cap BIGINT,
                         sector VARCHAR(100),
                         industry VARCHAR(100),
-                        bid_price DECIMAL(10,2),
-                        ask_price DECIMAL(10,2),
-                        spread DECIMAL(10,2),
-                        spread_pct DECIMAL(10,2),
                         PRIMARY KEY (scan_id, symbol)
                     )
                 """)
@@ -684,11 +621,7 @@ class EnhancedDynamicSecurityScanner:
                             i < 5,   # selected_for_trading
                             security.get('market_cap'),
                             security.get('sector'),
-                            security.get('industry'),
-                            security.get('bid_price'),
-                            security.get('ask_price'),
-                            security.get('spread'),
-                            security.get('spread_pct')
+                            security.get('industry')
                         ))
                         
                     except Exception as e:
@@ -707,8 +640,7 @@ class EnhancedDynamicSecurityScanner:
                             rsi_14, sma_20, sma_50, vwap,
                             has_news, news_count, catalyst_score, primary_catalyst, news_recency_hours,
                             scan_rank, made_top_20, made_top_5, selected_for_trading,
-                            market_cap, sector, industry,
-                            bid_price, ask_price, spread, spread_pct
+                            market_cap, sector, industry
                         ) VALUES %s
                         ON CONFLICT (scan_id, symbol) DO NOTHING
                     """, insert_data)
@@ -852,8 +784,8 @@ class EnhancedDynamicSecurityScanner:
                     'service_info': {
                         'url': f"http://scanner-service:{self.port}",
                         'port': self.port,
-                        'version': '3.2.0',
-                        'capabilities': ['top_100_tracking', 'pattern_data_collection', 'comprehensive_market_data', 'alpaca_data']
+                        'version': '3.1.1',
+                        'capabilities': ['top_100_tracking', 'pattern_data_collection', 'comprehensive_market_data']
                     }
                 },
                 timeout=5
@@ -876,7 +808,7 @@ class EnhancedDynamicSecurityScanner:
     def run(self):
         """Start the scanner service"""
         self.logger.info("Starting Enhanced Dynamic Security Scanner",
-                        version="3.2.0",
+                        version="3.1.1",
                         port=self.port,
                         environment=os.getenv('ENVIRONMENT', 'development'))
         
