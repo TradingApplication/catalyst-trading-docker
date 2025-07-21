@@ -2,23 +2,29 @@
 """
 Name of Application: Catalyst Trading System
 Name of file: reporting_service.py
-Version: 2.1.3
-Last Updated: 2025-07-14
+Version: 2.1.2
+Last Updated: 2025-07-08
 Purpose: Analytics and reporting service for trading performance and system health
 
 REVISION HISTORY:
-v2.1.3 (2025-07-14) - Database schema compliance
-- Fixed all table references to match actual schema
-- Removed references to non-existent "positions" table
-- Fixed column names: executed_at → entry_timestamp, pnl → pnl_amount
-- Removed references to non-existent "commission" column
-- Open positions now derived from trade_records WHERE status = 'open'
-
-v2.1.2 (2025-07-14) - Fixed table names
+v2.1.2 (2025-07-14) - Fixed endpoint calls
 - Table reference change FROM trades → FROM trade_records
 
 v2.1.1 (2025-07-08) - Fixed endpoint calls
 - Changed /service_status to /service_health in two places
+- Fixed _generate_system_health_report method
+- Fixed _get_service_performance_metrics method
+
+v2.1.0 (2025-07-01) - Initial implementation for production deployment
+- PostgreSQL database integration
+- Comprehensive performance analytics
+- Real-time system health monitoring
+- Trade analytics and pattern effectiveness reporting
+- Daily/weekly/monthly summary reports
+- Risk management metrics
+- Service orchestration integration
+- Environment variable configuration
+- Structured logging with rotation
 
 Description of Service:
 The Reporting Service provides comprehensive analytics and reporting capabilities:
@@ -57,32 +63,15 @@ from dotenv import load_dotenv
 # Load environment variables
 load_dotenv()
 
-# Import database utilities
-try:
-    from database_utils import (
-        get_db_connection as get_db_conn_util,
-        get_redis,
-        health_check
-    )
-    USE_DB_UTILS = True
-except ImportError:
-    USE_DB_UTILS = False
-    # Fallback database connection
-    def get_db_conn_util():
-        """Fallback database connection"""
-        return psycopg2.connect(
-            os.getenv('DATABASE_URL', 'postgresql://catalyst_user:password@db:5432/catalyst_trading'),
-            cursor_factory=RealDictCursor
-        )
-
 # Database connection utilities
 def get_db_connection():
     """Get PostgreSQL database connection"""
     try:
-        if USE_DB_UTILS:
-            return get_db_conn_util()
-        else:
-            return get_db_conn_util()
+        conn = psycopg2.connect(
+            os.getenv('DATABASE_URL', 'postgresql://catalyst_user:password@db:5432/catalyst_trading'),
+            cursor_factory=RealDictCursor
+        )
+        return conn
     except Exception as e:
         logger.error("Database connection failed", error=str(e))
         raise
@@ -90,10 +79,7 @@ def get_db_connection():
 def get_redis_connection():
     """Get Redis connection for caching"""
     try:
-        if USE_DB_UTILS:
-            return get_redis()
-        else:
-            return redis.from_url(os.getenv('REDIS_URL', 'redis://redis:6379/0'))
+        return redis.from_url(os.getenv('REDIS_URL', 'redis://redis:6379/0'))
     except Exception as e:
         logger.error("Redis connection failed", error=str(e))
         return None
@@ -187,7 +173,7 @@ class ReportingService:
                     'timestamp': datetime.now(timezone.utc).isoformat(),
                     'database': 'healthy',
                     'redis': redis_status,
-                    'version': '2.1.3'
+                    'version': '2.1.1'
                 }), 200
                 
             except Exception as e:
@@ -352,17 +338,17 @@ class ReportingService:
                 cur.execute("""
                     SELECT 
                         COUNT(*) as total_trades,
-                        SUM(CASE WHEN pnl_amount > 0 THEN 1 ELSE 0 END) as winning_trades,
-                        SUM(CASE WHEN pnl_amount < 0 THEN 1 ELSE 0 END) as losing_trades,
-                        SUM(pnl_amount) as total_pnl,
-                        AVG(CASE WHEN pnl_amount > 0 THEN pnl_amount END) as avg_win,
-                        AVG(CASE WHEN pnl_amount < 0 THEN pnl_amount END) as avg_loss,
-                        MAX(pnl_amount) as largest_win,
-                        MIN(pnl_amount) as largest_loss,
-                        SUM(quantity) as total_volume
+                        SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as winning_trades,
+                        SUM(CASE WHEN pnl < 0 THEN 1 ELSE 0 END) as losing_trades,
+                        SUM(pnl) as total_pnl,
+                        AVG(CASE WHEN pnl > 0 THEN pnl END) as avg_win,
+                        AVG(CASE WHEN pnl < 0 THEN pnl END) as avg_loss,
+                        MAX(pnl) as largest_win,
+                        MIN(pnl) as largest_loss,
+                        SUM(quantity) as total_volume,
+                        SUM(commission) as total_commissions
                     FROM trade_records 
-                    WHERE DATE(entry_timestamp) = %s
-                    AND status = 'closed'
+                    WHERE DATE(executed_at) = %s
                 """, (target_date,))
                 
                 trade_stats = cur.fetchone()
@@ -372,7 +358,7 @@ class ReportingService:
                     SELECT 
                         COUNT(DISTINCT symbol) as symbols_scanned,
                         COUNT(*) as scan_results,
-                        AVG(catalyst_score) as avg_confidence
+                        AVG(confidence_score) as avg_confidence
                     FROM trading_candidates 
                     WHERE DATE(created_at) = %s
                 """, (target_date,))
@@ -384,9 +370,9 @@ class ReportingService:
                     SELECT 
                         pattern_type,
                         COUNT(*) as count,
-                        AVG(pattern_strength) as avg_confidence
+                        AVG(confidence) as avg_confidence
                     FROM pattern_analysis 
-                    WHERE DATE(detection_timestamp) = %s
+                    WHERE DATE(created_at) = %s
                     GROUP BY pattern_type
                 """, (target_date,))
                 
@@ -416,7 +402,8 @@ class ReportingService:
                 'largest_win': float(trade_stats['largest_win'] or 0),
                 'largest_loss': float(trade_stats['largest_loss'] or 0),
                 'profit_factor': round(profit_factor, 2),
-                'total_volume': trade_stats['total_volume'] or 0
+                'total_volume': trade_stats['total_volume'] or 0,
+                'total_commissions': float(trade_stats['total_commissions'] or 0)
             },
             'scanning_summary': {
                 'symbols_scanned': scan_stats['symbols_scanned'] or 0,
@@ -457,46 +444,41 @@ class ReportingService:
         
         with get_db_connection() as conn:
             with conn.cursor() as cur:
-                # Get all closed trades in period
+                # Get all trade_records in period
                 cur.execute("""
                     SELECT * FROM trade_records 
-                    WHERE entry_timestamp >= %s 
-                    AND status = 'closed'
-                    ORDER BY entry_timestamp
+                    WHERE executed_at >= %s 
+                    ORDER BY executed_at
                 """, (start_date,))
                 
-                closed_trades = cur.fetchall()
+                trade_records = cur.fetchall()
                 
-                # Get current open positions if requested
-                open_positions = []
+                # Get current positions if requested
+                positions = []
                 if include_positions:
                     cur.execute("""
-                        SELECT 
-                            tr.*,
-                            current_timestamp - tr.entry_timestamp as position_age
-                        FROM trade_records tr
-                        WHERE tr.status = 'open'
-                        ORDER BY tr.entry_timestamp DESC
+                        SELECT * FROM positions 
+                        WHERE is_open = true
                     """)
-                    open_positions = cur.fetchall()
+                    positions = cur.fetchall()
         
         # Calculate performance metrics
-        if not closed_trades:
+        if not trade_records:
             return {
                 'period_days': period_days,
                 'total_trades': 0,
                 'performance': PerformanceMetrics().__dict__,
                 'daily_returns': [],
-                'open_positions': open_positions if include_positions else None,
+                'positions': positions if include_positions else None,
                 'generated_at': datetime.now(timezone.utc).isoformat()
             }
         
         # Calculate metrics
-        total_trades = len(closed_trades)
-        winning_trades = len([t for t in closed_trades if (t['pnl_amount'] or 0) > 0])
-        losing_trades = len([t for t in closed_trades if (t['pnl_amount'] or 0) < 0])
+        total_trades = len(trade_records)
+        winning_trades = len([t for t in trade_records if (t['pnl'] or 0) > 0])
+        losing_trades = len([t for t in trade_records if (t['pnl'] or 0) < 0])
         
-        pnls = [float(t['pnl_amount'] or 0) for t in closed_trades]
+        pnls = [float(t['pnl'] or 0) for t in trade_records]
         wins = [p for p in pnls if p > 0]
         losses = [p for p in pnls if p < 0]
         
@@ -506,7 +488,7 @@ class ReportingService:
         average_loss = sum(losses) / len(losses) if losses else 0
         
         # Calculate Sharpe ratio (simplified)
-        daily_returns = self._calculate_daily_returns(closed_trades)
+        daily_returns = self._calculate_daily_returns(trade_records)
         sharpe_ratio = self._calculate_sharpe_ratio(daily_returns)
         
         # Calculate max drawdown
@@ -530,30 +512,15 @@ class ReportingService:
             profit_factor=round(profit_factor, 2),
             sharpe_ratio=round(sharpe_ratio, 2),
             max_drawdown=round(max_drawdown, 2),
-            total_volume=sum([t['quantity'] or 0 for t in closed_trades]),
-            total_commissions=0.0  # No commission column in schema
+            total_volume=sum([t['quantity'] or 0 for t in trade_records]),
+            total_commissions=sum([float(t['commission'] or 0) for t in trade_records])
         )
-        
-        # Format open positions for response
-        if include_positions:
-            formatted_positions = []
-            for pos in open_positions:
-                formatted_positions.append({
-                    'symbol': pos['symbol'],
-                    'quantity': pos['quantity'],
-                    'entry_price': float(pos['entry_price'] or 0),
-                    'stop_loss': float(pos['stop_loss'] or 0),
-                    'take_profit': float(pos['take_profit'] or 0),
-                    'entry_timestamp': pos['entry_timestamp'].isoformat() if pos['entry_timestamp'] else None,
-                    'position_age_hours': pos['position_age'].total_seconds() / 3600 if pos['position_age'] else 0
-                })
-            open_positions = formatted_positions
         
         result = {
             'period_days': period_days,
             'performance': performance.__dict__,
             'daily_returns': daily_returns,
-            'open_positions': open_positions if include_positions else None,
+            'positions': positions if include_positions else None,
             'generated_at': datetime.now(timezone.utc).isoformat()
         }
         
@@ -578,18 +545,17 @@ class ReportingService:
                     SELECT 
                         pa.pattern_type,
                         pa.symbol,
-                        pa.pattern_strength as confidence,
-                        pa.detection_timestamp as created_at,
-                        tr.pnl_amount as pnl,
-                        tr.entry_timestamp as executed_at
+                        pa.confidence,
+                        pa.created_at,
+                        t.pnl,
+                        t.executed_at
                     FROM pattern_analysis pa
                     LEFT JOIN trading_candidates tc ON pa.symbol = tc.symbol 
-                        AND DATE(pa.detection_timestamp) = DATE(tc.created_at)
-                    LEFT JOIN trade_records tr ON tc.symbol = tr.symbol 
-                        AND tr.entry_timestamp >= pa.detection_timestamp
-                        AND tr.entry_timestamp <= pa.detection_timestamp + INTERVAL '24 hours'
-                        AND tr.status = 'closed'
-                    WHERE pa.detection_timestamp >= %s
+                        AND DATE(pa.created_at) = DATE(tc.created_at)
+                    LEFT JOIN trade_records t ON tc.symbol = t.symbol 
+                        AND t.executed_at >= pa.created_at
+                        AND t.executed_at <= pa.created_at + INTERVAL '24 hours'
+                    WHERE pa.created_at >= %s
                 """
                 
                 params = [start_date]
@@ -653,6 +619,7 @@ class ReportingService:
         """Generate comprehensive system health report"""
         # Get service health from coordination service
         try:
+            # FIXED: Changed from /service_status to /service_health
             response = requests.get(f"{self.coordination_url}/service_health", timeout=10)
             service_health = response.json() if response.status_code == 200 else {}
         except:
@@ -691,28 +658,27 @@ class ReportingService:
         """Calculate current risk management metrics"""
         with get_db_connection() as conn:
             with conn.cursor() as cur:
-                # Current open positions from trade_records
+                # Current positions
                 cur.execute("""
                     SELECT 
                         COUNT(*) as position_count,
-                        SUM(ABS(quantity * entry_price)) as total_exposure,
-                        MAX(ABS(quantity * entry_price)) as max_position_value
-                    FROM trade_records 
-                    WHERE status = 'open'
+                        SUM(ABS(quantity * current_price)) as total_exposure,
+                        MAX(ABS(quantity * current_price)) as max_position_value
+                    FROM positions 
+                    WHERE is_open = true
                 """)
                 
                 position_data = cur.fetchone()
                 
                 # Recent P&L for VaR calculation
                 cur.execute("""
-                    SELECT pnl_amount 
+                    SELECT pnl 
                     FROM trade_records 
-                    WHERE entry_timestamp >= NOW() - INTERVAL '30 days'
-                    AND status = 'closed'
-                    ORDER BY entry_timestamp
+                    WHERE executed_at >= NOW() - INTERVAL '30 days'
+                    ORDER BY executed_at
                 """)
                 
-                recent_pnls = [float(row['pnl_amount'] or 0) for row in cur.fetchall()]
+                recent_pnls = [float(row['pnl'] or 0) for row in cur.fetchall()]
         
         # Calculate VaR (95% confidence)
         var_95 = 0
@@ -741,33 +707,30 @@ class ReportingService:
         """Comprehensive portfolio analysis"""
         with get_db_connection() as conn:
             with conn.cursor() as cur:
-                # Portfolio composition from open trade_records
+                # Portfolio composition
                 cur.execute("""
                     SELECT 
-                        tr.symbol,
-                        tr.quantity,
-                        tr.entry_price,
-                        tr.stop_loss,
-                        tr.take_profit,
-                        tr.entry_timestamp,
-                        CURRENT_TIMESTAMP - tr.entry_timestamp as position_age
-                    FROM trade_records tr
-                    WHERE tr.status = 'open'
-                    ORDER BY tr.entry_timestamp DESC
+                        symbol,
+                        quantity,
+                        entry_price,
+                        current_price,
+                        (current_price - entry_price) * quantity as unrealized_pnl,
+                        entry_date
+                    FROM positions 
+                    WHERE is_open = true
                 """)
                 
                 positions = cur.fetchall()
                 
-                # Symbol performance from closed trades
+                # Sector/industry distribution (simplified)
                 cur.execute("""
                     SELECT 
                         symbol,
                         COUNT(*) as trade_count,
-                        SUM(pnl_amount) as total_pnl,
-                        AVG(pnl_amount) as avg_pnl
+                        SUM(pnl) as total_pnl,
+                        AVG(pnl) as avg_pnl
                     FROM trade_records 
-                    WHERE entry_timestamp >= NOW() - INTERVAL '30 days'
-                    AND status = 'closed'
+                    WHERE executed_at >= NOW() - INTERVAL '30 days'
                     GROUP BY symbol
                     ORDER BY total_pnl DESC
                 """)
@@ -775,21 +738,21 @@ class ReportingService:
                 symbol_performance = cur.fetchall()
         
         # Calculate portfolio metrics
-        # Note: We don't have current_price in the schema, so we'll use entry_price
-        total_value = sum([float(p['quantity']) * float(p['entry_price'] or 0) for p in positions])
+        total_value = sum([float(p['quantity']) * float(p['current_price'] or 0) for p in positions])
+        total_unrealized_pnl = sum([float(p['unrealized_pnl'] or 0) for p in positions])
         
         return {
             'portfolio_value': round(total_value, 2),
+            'unrealized_pnl': round(total_unrealized_pnl, 2),
             'position_count': len(positions),
             'positions': [
                 {
                     'symbol': p['symbol'],
                     'quantity': p['quantity'],
                     'entry_price': float(p['entry_price'] or 0),
-                    'stop_loss': float(p['stop_loss'] or 0),
-                    'take_profit': float(p['take_profit'] or 0),
-                    'days_held': p['position_age'].days if p['position_age'] else 0,
-                    'hours_held': p['position_age'].total_seconds() / 3600 if p['position_age'] else 0
+                    'current_price': float(p['current_price'] or 0),
+                    'unrealized_pnl': float(p['unrealized_pnl'] or 0),
+                    'days_held': (datetime.now().date() - p['entry_date']).days if p['entry_date'] else 0
                 }
                 for p in positions
             ],
@@ -845,6 +808,7 @@ class ReportingService:
     def _get_service_performance_metrics(self) -> Dict:
         """Get performance metrics for each service"""
         try:
+            # FIXED: Changed from /service_status to /service_health
             response = requests.get(f"{self.coordination_url}/service_health", timeout=10)
             service_status = response.json() if response.status_code == 200 else {}
         except:
@@ -861,21 +825,21 @@ class ReportingService:
         }
 
     # Helper methods
-    def _calculate_daily_returns(self, trades: List) -> List[float]:
-        """Calculate daily returns from trades"""
-        if not trades:
+    def _calculate_daily_returns(self, trade_records: List) -> List[float]:
+        """Calculate daily returns from trade_records"""
+        if not trade_records:
             return []
         
-        # Group trades by date and sum P&L
+        # Group trade_records by date and sum P&L
         daily_pnl = {}
-        for trade in trades:
-            date = trade['entry_timestamp'].date() if hasattr(trade['entry_timestamp'], 'date') else trade['entry_timestamp']
+        for trade in trade_records:
+            date = trade['executed_at'].date() if hasattr(trade['executed_at'], 'date') else trade['executed_at']
             if isinstance(date, str):
                 date = datetime.strptime(date.split()[0], '%Y-%m-%d').date()
             
             if date not in daily_pnl:
                 daily_pnl[date] = 0
-            daily_pnl[date] += float(trade['pnl_amount'] or 0)
+            daily_pnl[date] += float(trade['pnl'] or 0)
         
         return list(daily_pnl.values())
 
