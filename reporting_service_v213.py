@@ -2,24 +2,17 @@
 """
 Name of Application: Catalyst Trading System
 Name of file: reporting_service.py
-Version: 2.1.4
-Last Updated: 2025-07-21
+Version: 2.1.3
+Last Updated: 2025-07-14
 Purpose: Analytics and reporting service for trading performance and system health
 
 REVISION HISTORY:
-v2.1.4 (2025-07-21) - Production fixes
-- Verified all column references match actual database schema
-- Fixed Redis authentication with REDIS_URL environment variable
-- Removed references to non-existent "status" column (using exit_timestamp IS NULL for open trades)
-- All executed_at references changed to entry_timestamp
-- All pnl references changed to pnl_amount
-
 v2.1.3 (2025-07-14) - Database schema compliance
 - Fixed all table references to match actual schema
 - Removed references to non-existent "positions" table
 - Fixed column names: executed_at → entry_timestamp, pnl → pnl_amount
 - Removed references to non-existent "commission" column
-- Open positions now derived from trade_records WHERE exit_timestamp IS NULL
+- Open positions now derived from trade_records WHERE status = 'open'
 
 v2.1.2 (2025-07-14) - Fixed table names
 - Table reference change FROM trades → FROM trade_records
@@ -64,15 +57,32 @@ from dotenv import load_dotenv
 # Load environment variables
 load_dotenv()
 
+# Import database utilities
+try:
+    from database_utils import (
+        get_db_connection as get_db_conn_util,
+        get_redis,
+        health_check
+    )
+    USE_DB_UTILS = True
+except ImportError:
+    USE_DB_UTILS = False
+    # Fallback database connection
+    def get_db_conn_util():
+        """Fallback database connection"""
+        return psycopg2.connect(
+            os.getenv('DATABASE_URL', 'postgresql://catalyst_user:password@db:5432/catalyst_trading'),
+            cursor_factory=RealDictCursor
+        )
+
 # Database connection utilities
 def get_db_connection():
     """Get PostgreSQL database connection"""
     try:
-        conn = psycopg2.connect(
-            os.getenv('DATABASE_URL', 'postgresql://catalyst_user:password@db:5432/catalyst_trading'),
-            cursor_factory=RealDictCursor
-        )
-        return conn
+        if USE_DB_UTILS:
+            return get_db_conn_util()
+        else:
+            return get_db_conn_util()
     except Exception as e:
         logger.error("Database connection failed", error=str(e))
         raise
@@ -80,7 +90,10 @@ def get_db_connection():
 def get_redis_connection():
     """Get Redis connection for caching"""
     try:
-        return redis.from_url(os.getenv('REDIS_URL', 'redis://redis:6379/0'))
+        if USE_DB_UTILS:
+            return get_redis()
+        else:
+            return redis.from_url(os.getenv('REDIS_URL', 'redis://redis:6379/0'))
     except Exception as e:
         logger.error("Redis connection failed", error=str(e))
         return None
@@ -174,7 +187,7 @@ class ReportingService:
                     'timestamp': datetime.now(timezone.utc).isoformat(),
                     'database': 'healthy',
                     'redis': redis_status,
-                    'version': '2.1.4'
+                    'version': '2.1.3'
                 }), 200
                 
             except Exception as e:
@@ -349,7 +362,7 @@ class ReportingService:
                         SUM(quantity) as total_volume
                     FROM trade_records 
                     WHERE DATE(entry_timestamp) = %s
-                    AND exit_timestamp IS NOT NULL
+                    AND status = 'closed'
                 """, (target_date,))
                 
                 trade_stats = cur.fetchone()
@@ -448,7 +461,7 @@ class ReportingService:
                 cur.execute("""
                     SELECT * FROM trade_records 
                     WHERE entry_timestamp >= %s 
-                    AND exit_timestamp IS NOT NULL
+                    AND status = 'closed'
                     ORDER BY entry_timestamp
                 """, (start_date,))
                 
@@ -462,7 +475,7 @@ class ReportingService:
                             tr.*,
                             current_timestamp - tr.entry_timestamp as position_age
                         FROM trade_records tr
-                        WHERE tr.exit_timestamp IS NULL
+                        WHERE tr.status = 'open'
                         ORDER BY tr.entry_timestamp DESC
                     """)
                     open_positions = cur.fetchall()
@@ -529,8 +542,8 @@ class ReportingService:
                     'symbol': pos['symbol'],
                     'quantity': pos['quantity'],
                     'entry_price': float(pos['entry_price'] or 0),
-                    'stop_loss': float(pos['stop_loss'] or 0) if pos.get('stop_loss') else 0,
-                    'take_profit': float(pos['take_profit'] or 0) if pos.get('take_profit') else 0,
+                    'stop_loss': float(pos['stop_loss'] or 0),
+                    'take_profit': float(pos['take_profit'] or 0),
                     'entry_timestamp': pos['entry_timestamp'].isoformat() if pos['entry_timestamp'] else None,
                     'position_age_hours': pos['position_age'].total_seconds() / 3600 if pos['position_age'] else 0
                 })
@@ -568,14 +581,14 @@ class ReportingService:
                         pa.pattern_strength as confidence,
                         pa.detection_timestamp as created_at,
                         tr.pnl_amount as pnl,
-                        tr.entry_timestamp
+                        tr.entry_timestamp as executed_at
                     FROM pattern_analysis pa
                     LEFT JOIN trading_candidates tc ON pa.symbol = tc.symbol 
                         AND DATE(pa.detection_timestamp) = DATE(tc.created_at)
                     LEFT JOIN trade_records tr ON tc.symbol = tr.symbol 
                         AND tr.entry_timestamp >= pa.detection_timestamp
                         AND tr.entry_timestamp <= pa.detection_timestamp + INTERVAL '24 hours'
-                        AND tr.exit_timestamp IS NOT NULL
+                        AND tr.status = 'closed'
                     WHERE pa.detection_timestamp >= %s
                 """
                 
@@ -685,7 +698,7 @@ class ReportingService:
                         SUM(ABS(quantity * entry_price)) as total_exposure,
                         MAX(ABS(quantity * entry_price)) as max_position_value
                     FROM trade_records 
-                    WHERE exit_timestamp IS NULL
+                    WHERE status = 'open'
                 """)
                 
                 position_data = cur.fetchone()
@@ -695,7 +708,7 @@ class ReportingService:
                     SELECT pnl_amount 
                     FROM trade_records 
                     WHERE entry_timestamp >= NOW() - INTERVAL '30 days'
-                    AND exit_timestamp IS NOT NULL
+                    AND status = 'closed'
                     ORDER BY entry_timestamp
                 """)
                 
@@ -739,7 +752,7 @@ class ReportingService:
                         tr.entry_timestamp,
                         CURRENT_TIMESTAMP - tr.entry_timestamp as position_age
                     FROM trade_records tr
-                    WHERE tr.exit_timestamp IS NULL
+                    WHERE tr.status = 'open'
                     ORDER BY tr.entry_timestamp DESC
                 """)
                 
@@ -754,7 +767,7 @@ class ReportingService:
                         AVG(pnl_amount) as avg_pnl
                     FROM trade_records 
                     WHERE entry_timestamp >= NOW() - INTERVAL '30 days'
-                    AND exit_timestamp IS NOT NULL
+                    AND status = 'closed'
                     GROUP BY symbol
                     ORDER BY total_pnl DESC
                 """)
@@ -773,8 +786,8 @@ class ReportingService:
                     'symbol': p['symbol'],
                     'quantity': p['quantity'],
                     'entry_price': float(p['entry_price'] or 0),
-                    'stop_loss': float(p['stop_loss'] or 0) if p.get('stop_loss') else 0,
-                    'take_profit': float(p['take_profit'] or 0) if p.get('take_profit') else 0,
+                    'stop_loss': float(p['stop_loss'] or 0),
+                    'take_profit': float(p['take_profit'] or 0),
                     'days_held': p['position_age'].days if p['position_age'] else 0,
                     'hours_held': p['position_age'].total_seconds() / 3600 if p['position_age'] else 0
                 }
